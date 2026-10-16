@@ -220,14 +220,27 @@ fn physical_cell_size(font_size_px: f32, scale_factor: f32) -> (u32, u32) {
 }
 
 /// PTY grid for a pane of `width` × `height` logical px.
+///
+/// This must describe exactly what `render()` paints: content inset by the
+/// terminal padding on every side, with a column every `cell_width_px` and a
+/// row every `cell_height_px` logical px. Sizing from the whole pane, or from
+/// the rounded physical cell, reports more columns than fit, and full-screen
+/// TUIs then draw past the right and bottom edges.
 fn grid_size_for_pane(
     width: f32,
     height: f32,
     configured_font_size: f32,
     scale_factor: f32,
 ) -> SurfaceSize {
-    let width_px = ((width * scale_factor).ceil() as u32).max(1);
-    let height_px = ((height * scale_factor).ceil() as u32).max(1);
+    // Bounds converted from device px can land just below an exact fit.
+    const FIT_TOLERANCE_PX: f32 = 0.01;
+
+    let usable_width = width - 2.0 * TERMINAL_PADDING_X_PX;
+    let usable_height = height - 2.0 * TERMINAL_PADDING_Y_PX;
+    // The PTY pixel size covers only the cells' area, so programs that size
+    // images from `ws_xpixel / ws_col` get the painted cell width.
+    let width_px = ((usable_width * scale_factor).round() as u32).max(1);
+    let height_px = ((usable_height * scale_factor).round() as u32).max(1);
 
     // Until the real grid renderer lands we estimate the PTY grid
     // from the configured mono font size so shells and TUIs do
@@ -244,12 +257,17 @@ fn grid_size_for_pane(
     // different device size (for example 9 px logical became 17 px at 2x),
     // which makes Kitty placements drift away from their text columns.
     let (cell_width, cell_height) = physical_cell_size(font_size_px, scale_factor);
-    let columns = (width_px / cell_width.max(1))
-        .max(1)
-        .min(u32::from(u16::MAX)) as u16;
-    let rows = (height_px / cell_height.max(1))
-        .max(1)
-        .min(u32::from(u16::MAX)) as u16;
+    // Count cells in logical px, the space `render()` lays them out in. The
+    // rounded physical cell differs at fractional scales (15 device px for a
+    // 9 px cell at 1.7x, which paints 15.3), and that error adds up across a row.
+    let cells_in = |usable: f32, cell: f32| {
+        ((usable + FIT_TOLERANCE_PX) / cell)
+            .floor()
+            .max(1.0)
+            .min(f32::from(u16::MAX)) as u16
+    };
+    let columns = cells_in(usable_width, cell_width_px(font_size_px));
+    let rows = cells_in(usable_height, cell_height_px(font_size_px));
 
     SurfaceSize {
         columns,
@@ -1000,10 +1018,9 @@ impl GhosttyView {
         let grid_y = grid_y.clamp(0.0, (grid_height - f32::EPSILON).max(0.0));
         let col = ((grid_x as u32) / cell_width).min(u32::from(snapshot.cols - 1)) as u16;
         let row = ((grid_y as u32) / cell_height).min(u32::from(snapshot.rows - 1)) as u16;
-        let screen_height_px = self.last_surface_size.map_or_else(
-            || ((f32::from(bounds.size.height) * scale).ceil() as u32).max(1),
-            |size| size.height_px.max(1),
-        );
+        // Autoscroll compares against the whole pane, padding included, not
+        // the PTY pixel size, which covers only the cells.
+        let screen_height_px = ((f32::from(bounds.size.height) * scale).ceil() as u32).max(1);
         Some((
             SelectionPoint {
                 col,
@@ -3565,8 +3582,9 @@ fn vt_color_to_hsla(packed: u32) -> Option<Hsla> {
 mod tests {
     use super::{
         BUNDLED_LINUX_FONT_FAMILY, CursorStyle, DEFAULT_FONT_SIZE, KITTY_BELOW_BACKGROUND_LIMIT,
-        KittyImageLayer, MIN_FONT_SIZE_PX, build_terminal_row, cell_height_px, cell_width_px,
-        cursor_overlay_cell, effective_font_size, kitty_image_to_render_image,
+        KittyImageLayer, MIN_FONT_SIZE_PX, TERMINAL_PADDING_X_PX, TERMINAL_PADDING_Y_PX,
+        build_terminal_row, cell_height_px, cell_width_px, cursor_overlay_cell,
+        effective_font_size, grid_size_for_pane, kitty_image_to_render_image,
         kitty_placement_geometry, physical_cell_size, rows_needing_refresh, vt_color_to_hsla,
     };
     use con_ghostty::{
@@ -3771,6 +3789,109 @@ mod tests {
     fn vt_color_zero_alpha_means_default() {
         assert_eq!(vt_color_to_hsla(0x000000_00), None);
         assert!(vt_color_to_hsla(0x112233_FF).is_some());
+    }
+
+    fn grid(width: f32, height: f32, scale: f32) -> (u16, u16) {
+        let size = grid_size_for_pane(width, height, 14.0, scale);
+        (size.columns, size.rows)
+    }
+
+    #[test]
+    fn grid_fits_the_reported_fractional_scale_pane() {
+        // Issue #485: a 2646 × 1238 device px pane at 1.7 scale used to
+        // report 176 × 36, painting about 40 px past the right edge.
+        assert_eq!(grid(2646.0 / 1.7, 1238.0 / 1.7, 1.7), (170, 35));
+    }
+
+    #[test]
+    fn grid_excludes_padding_at_unit_scale() {
+        assert_eq!(grid(800.0, 600.0, 1.0), (86, 29));
+    }
+
+    #[test]
+    fn grid_is_the_largest_painted_grid_that_fits_inside_the_padding() {
+        let cell_width = cell_width_px(14.0);
+        let cell_height = cell_height_px(14.0);
+        let tolerance = 0.01;
+        for scale in [1.0, 1.25, 1.5, 1.7, 2.0] {
+            for half_px in 2..=8000 {
+                let extent = half_px as f32 / 2.0;
+                let (columns, rows) = grid(extent, extent, scale);
+                for (count, cell, padding) in [
+                    (columns, cell_width, TERMINAL_PADDING_X_PX),
+                    (rows, cell_height, TERMINAL_PADDING_Y_PX),
+                ] {
+                    let painted = |n: u16| 2.0 * padding + f32::from(n) * cell;
+                    assert!(
+                        count == 1 || painted(count) <= extent + tolerance,
+                        "{count} cells of {cell} overflow {extent} px at {scale}x"
+                    );
+                    assert!(
+                        painted(count + 1) > extent + tolerance,
+                        "{count} cells of {cell} leave room for another in {extent} px at {scale}x"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grid_is_at_least_one_cell_in_panes_smaller_than_the_padding() {
+        assert_eq!(grid(0.0, 0.0, 1.7), (1, 1));
+        assert_eq!(grid(20.0, 15.0, 1.0), (1, 1));
+        let size = grid_size_for_pane(0.0, 0.0, 14.0, 1.7);
+        assert_eq!((size.width_px, size.height_px), (1, 1));
+    }
+
+    #[test]
+    fn grid_survives_nan_and_infinite_panes() {
+        assert_eq!(grid(f32::NAN, f32::NAN, 1.7), (1, 1));
+        assert_eq!(
+            grid(f32::INFINITY, f32::INFINITY, 1.7),
+            (u16::MAX, u16::MAX)
+        );
+    }
+
+    #[test]
+    fn grid_keeps_physical_cells_and_reports_pixels_inside_the_padding() {
+        let size = grid_size_for_pane(2646.0 / 1.7, 1238.0 / 1.7, 14.0, 1.7);
+        assert_eq!((size.cell_width_px, size.cell_height_px), (15, 34));
+        assert_eq!((size.width_px, size.height_px), (2605, 1204));
+    }
+
+    #[test]
+    fn grid_uses_the_clamped_font_size() {
+        assert_eq!(
+            grid_size_for_pane(800.0, 600.0, 4.0, 1.0),
+            grid_size_for_pane(800.0, 600.0, MIN_FONT_SIZE_PX, 1.0)
+        );
+    }
+
+    #[test]
+    fn grid_keeps_an_exact_fit_through_scale_rounding() {
+        // 24 px padding + 86 × 9 px cells = 798 logical px, arriving as an
+        // inexact device-to-logical conversion.
+        assert_eq!(grid(1356.6 / 1.7, 600.0, 1.7).0, 86);
+    }
+
+    #[gpui::test]
+    fn resize_sends_painted_grid_and_keeps_full_pane_for_selection(cx: &mut gpui::TestAppContext) {
+        use gpui::{point, px};
+
+        let view = mouse_test_view(cx);
+        view.update(cx, |view, _cx| {
+            let bounds = view.pane_bounds.unwrap();
+            view.sync_surface_size(bounds, 1.5);
+            let sent = view.terminal().unwrap().size();
+            // 800 × 520 logical px at 1.5x, inside 12 / 10 px padding.
+            assert_eq!((sent.columns, sent.rows), (86, 25));
+            assert_eq!((sent.width_px, sent.height_px), (1164, 750));
+
+            let (_, geometry) = view
+                .selection_input_from_event_position(point(px(100.0), px(100.0)), true)
+                .unwrap();
+            assert_eq!(geometry.screen_height_px, 780);
+        });
     }
 
     #[test]
