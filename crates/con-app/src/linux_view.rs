@@ -47,6 +47,8 @@ const DEFAULT_CELL_WIDTH_RATIO: f32 = 0.62;
 const DEFAULT_CELL_HEIGHT_RATIO: f32 = 1.45;
 const TERMINAL_PADDING_X_PX: f32 = 12.0;
 const TERMINAL_PADDING_Y_PX: f32 = 10.0;
+/// Pane bounds converted from device px can land just below an exact grid fit.
+const GRID_FIT_TOLERANCE_PX: f32 = 0.01;
 const KITTY_BELOW_BACKGROUND_LIMIT: i32 = i32::MIN / 2;
 const SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(15);
 const BUNDLED_LINUX_FONT_FAMILY: &str = "IoskeleyMono";
@@ -232,9 +234,6 @@ fn grid_size_for_pane(
     configured_font_size: f32,
     scale_factor: f32,
 ) -> SurfaceSize {
-    // Bounds converted from device px can land just below an exact fit.
-    const FIT_TOLERANCE_PX: f32 = 0.01;
-
     let usable_width = width - 2.0 * TERMINAL_PADDING_X_PX;
     let usable_height = height - 2.0 * TERMINAL_PADDING_Y_PX;
     // The PTY pixel size covers only the cells' area, so programs that size
@@ -256,12 +255,13 @@ fn grid_size_for_pane(
     // recalculating the ratios from an already-scaled font can round to a
     // different device size (for example 9 px logical became 17 px at 2x),
     // which makes Kitty placements drift away from their text columns.
-    let (cell_width, cell_height) = physical_cell_size(font_size_px, scale_factor);
+    let (physical_cell_width, physical_cell_height) =
+        physical_cell_size(font_size_px, scale_factor);
     // Count cells in logical px, the space `render()` lays them out in. The
     // rounded physical cell differs at fractional scales (15 device px for a
     // 9 px cell at 1.7x, which paints 15.3), and that error adds up across a row.
     let cells_in = |usable: f32, cell: f32| {
-        ((usable + FIT_TOLERANCE_PX) / cell)
+        ((usable + GRID_FIT_TOLERANCE_PX) / cell)
             .floor()
             .max(1.0)
             .min(f32::from(u16::MAX)) as u16
@@ -274,8 +274,8 @@ fn grid_size_for_pane(
         rows,
         width_px,
         height_px,
-        cell_width_px: cell_width,
-        cell_height_px: cell_height,
+        cell_width_px: physical_cell_width,
+        cell_height_px: physical_cell_height,
     }
 }
 
@@ -3581,10 +3581,10 @@ fn vt_color_to_hsla(packed: u32) -> Option<Hsla> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BUNDLED_LINUX_FONT_FAMILY, CursorStyle, DEFAULT_FONT_SIZE, KITTY_BELOW_BACKGROUND_LIMIT,
-        KittyImageLayer, MIN_FONT_SIZE_PX, TERMINAL_PADDING_X_PX, TERMINAL_PADDING_Y_PX,
-        build_terminal_row, cell_height_px, cell_width_px, cursor_overlay_cell,
-        effective_font_size, grid_size_for_pane, kitty_image_to_render_image,
+        BUNDLED_LINUX_FONT_FAMILY, CursorStyle, DEFAULT_FONT_SIZE, GRID_FIT_TOLERANCE_PX,
+        KITTY_BELOW_BACKGROUND_LIMIT, KittyImageLayer, MIN_FONT_SIZE_PX, TERMINAL_PADDING_X_PX,
+        TERMINAL_PADDING_Y_PX, build_terminal_row, cell_height_px, cell_width_px,
+        cursor_overlay_cell, effective_font_size, grid_size_for_pane, kitty_image_to_render_image,
         kitty_placement_geometry, physical_cell_size, rows_needing_refresh, vt_color_to_hsla,
     };
     use con_ghostty::{
@@ -3812,7 +3812,6 @@ mod tests {
     fn grid_is_the_largest_painted_grid_that_fits_inside_the_padding() {
         let cell_width = cell_width_px(14.0);
         let cell_height = cell_height_px(14.0);
-        let tolerance = 0.01;
         for scale in [1.0, 1.25, 1.5, 1.7, 2.0] {
             for half_px in 2..=8000 {
                 let extent = half_px as f32 / 2.0;
@@ -3823,11 +3822,11 @@ mod tests {
                 ] {
                     let painted = |n: u16| 2.0 * padding + f32::from(n) * cell;
                     assert!(
-                        count == 1 || painted(count) <= extent + tolerance,
+                        count == 1 || painted(count) <= extent + GRID_FIT_TOLERANCE_PX,
                         "{count} cells of {cell} overflow {extent} px at {scale}x"
                     );
                     assert!(
-                        painted(count + 1) > extent + tolerance,
+                        painted(count + 1) > extent + GRID_FIT_TOLERANCE_PX,
                         "{count} cells of {cell} leave room for another in {extent} px at {scale}x"
                     );
                 }
