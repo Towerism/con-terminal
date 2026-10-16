@@ -4,6 +4,17 @@ All notable changes to con are documented here.
 
 con is still pre-release, so entries may group related beta work while the product shape is stabilizing.
 
+## `v0.1.0-beta.139`
+
+### Fixed
+
+**Linux**
+
+- Full-screen terminal programs such as Claude Code now fit inside the pane at
+  fractional display scales. Con no longer reports more columns and rows than
+  it draws, so their right edge and last row stay visible above the input bar.
+  _(PR [#487](https://github.com/nowledge-co/con-terminal/pull/487) by [@Towerism](https://github.com/Towerism))_
+
 ## `v0.1.0-beta.138` - 2026-10-16
 
 ### Changed
