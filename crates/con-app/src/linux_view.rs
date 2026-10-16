@@ -219,6 +219,48 @@ fn physical_cell_size(font_size_px: f32, scale_factor: f32) -> (u32, u32) {
     )
 }
 
+/// PTY grid for a pane of `width` × `height` logical px.
+fn grid_size_for_pane(
+    width: f32,
+    height: f32,
+    configured_font_size: f32,
+    scale_factor: f32,
+) -> SurfaceSize {
+    let width_px = ((width * scale_factor).ceil() as u32).max(1);
+    let height_px = ((height * scale_factor).ceil() as u32).max(1);
+
+    // Until the real grid renderer lands we estimate the PTY grid
+    // from the configured mono font size so shells and TUIs do
+    // not stay stuck at the initial 80x24 forever. Run through
+    // the same `effective_font_size` clamp `render()` uses so
+    // the grid we ask the PTY for matches the cell size we
+    // actually paint at — picking different floors here would
+    // make text overrun the estimated column count and lines
+    // wrap unexpectedly on the alternate screen.
+    let font_size_px = effective_font_size(configured_font_size);
+    // GPUI paints in logical pixels and applies the display scale after
+    // layout. Scale those exact logical cell metrics for libghostty too;
+    // recalculating the ratios from an already-scaled font can round to a
+    // different device size (for example 9 px logical became 17 px at 2x),
+    // which makes Kitty placements drift away from their text columns.
+    let (cell_width, cell_height) = physical_cell_size(font_size_px, scale_factor);
+    let columns = (width_px / cell_width.max(1))
+        .max(1)
+        .min(u32::from(u16::MAX)) as u16;
+    let rows = (height_px / cell_height.max(1))
+        .max(1)
+        .min(u32::from(u16::MAX)) as u16;
+
+    SurfaceSize {
+        columns,
+        rows,
+        width_px,
+        height_px,
+        cell_width_px: cell_width,
+        cell_height_px: cell_height,
+    }
+}
+
 actions!(ghostty, [ConsumeTab, ConsumeTabPrev]);
 
 #[allow(dead_code)]
@@ -880,39 +922,12 @@ impl GhosttyView {
     }
 
     fn estimate_surface_size(&self, bounds: Bounds<Pixels>, scale_factor: f32) -> SurfaceSize {
-        let width_px = ((f32::from(bounds.size.width) * scale_factor).ceil() as u32).max(1);
-        let height_px = ((f32::from(bounds.size.height) * scale_factor).ceil() as u32).max(1);
-
-        // Until the real grid renderer lands we estimate the PTY grid
-        // from the configured mono font size so shells and TUIs do
-        // not stay stuck at the initial 80x24 forever. Run through
-        // the same `effective_font_size` clamp `render()` uses so
-        // the grid we ask the PTY for matches the cell size we
-        // actually paint at — picking different floors here would
-        // make text overrun the estimated column count and lines
-        // wrap unexpectedly on the alternate screen.
-        let font_size_px = effective_font_size(self.initial_font_size);
-        // GPUI paints in logical pixels and applies the display scale after
-        // layout. Scale those exact logical cell metrics for libghostty too;
-        // recalculating the ratios from an already-scaled font can round to a
-        // different device size (for example 9 px logical became 17 px at 2x),
-        // which makes Kitty placements drift away from their text columns.
-        let (cell_width, cell_height) = physical_cell_size(font_size_px, scale_factor);
-        let columns = (width_px / cell_width.max(1))
-            .max(1)
-            .min(u32::from(u16::MAX)) as u16;
-        let rows = (height_px / cell_height.max(1))
-            .max(1)
-            .min(u32::from(u16::MAX)) as u16;
-
-        SurfaceSize {
-            columns,
-            rows,
-            width_px,
-            height_px,
-            cell_width_px: cell_width,
-            cell_height_px: cell_height,
-        }
+        grid_size_for_pane(
+            f32::from(bounds.size.width),
+            f32::from(bounds.size.height),
+            self.initial_font_size,
+            scale_factor,
+        )
     }
 
     fn cell_from_event_position(&self, pos: Point<Pixels>) -> Option<(u16, u16)> {
