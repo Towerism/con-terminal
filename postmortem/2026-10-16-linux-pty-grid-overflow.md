@@ -7,7 +7,7 @@
 
 On Linux, full-screen terminal UIs (TUIs) such as Claude Code drew past the right edge of the
 pane and lost their last row behind the input bar. The report came from KDE on
-Wayland at 1.7 display scale with vertical tabs on. The pty reported 176 × 36
+Wayland at 1.7 display scale with vertical tabs on. The pseudo-terminal (pty) reported 176 × 36
 for a pane that fits 170 × 35. Toggling the tab panel changed the width by only
 4–5 columns, which made the panel look like the cause.
 
