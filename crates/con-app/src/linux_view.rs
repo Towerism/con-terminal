@@ -47,7 +47,7 @@ const DEFAULT_CELL_WIDTH_RATIO: f32 = 0.62;
 const DEFAULT_CELL_HEIGHT_RATIO: f32 = 1.45;
 const TERMINAL_PADDING_X_PX: f32 = 12.0;
 const TERMINAL_PADDING_Y_PX: f32 = 10.0;
-/// Pane bounds converted from device px can land just below an exact grid fit.
+/// Pane bounds converted from device px can land slightly below an exact grid fit.
 const GRID_FIT_TOLERANCE_PX: f32 = 0.01;
 const KITTY_BELOW_BACKGROUND_LIMIT: i32 = i32::MIN / 2;
 const SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(15);
@@ -226,8 +226,8 @@ fn physical_cell_size(font_size_px: f32, scale_factor: f32) -> (u32, u32) {
 /// This must describe exactly what `render()` paints: content inset by the
 /// terminal padding on every side, with a column every `cell_width_px` and a
 /// row every `cell_height_px` logical px. Sizing from the whole pane, or from
-/// the rounded physical cell, reports more columns than fit, and full-screen
-/// TUIs then draw past the right and bottom edges.
+/// the rounded physical cell, reports more columns than fit. Full-screen
+/// terminal programs then draw past the right and bottom edges (#485).
 fn grid_size_for_pane(
     width: f32,
     height: f32,
