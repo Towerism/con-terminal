@@ -189,3 +189,5 @@ jobs:
           cargo test --locked -p con --bin con input_bar::tests
       - name: Program status reducer benchmark correctness
         run: cargo test --locked -p con-core --example program_status_bench
+      - name: Linux terminal view regression tests
+        run: cargo test --locked -p con --bin con ghostty_view::tests

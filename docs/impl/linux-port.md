@@ -139,6 +139,18 @@ What it still does **not** give you:
   `co.nowledge.con.desktop` launcher identity, icon install, appcast,
   and notify-only updater
 
+### Grid geometry contract
+
+The Linux view counts columns and rows in logical pixels inside its terminal
+padding, using the same effective font size and cell metrics as painting.
+Do not divide the whole pane by rounded physical cell sizes: fractional-scale
+rounding accumulates across a row and can report cells outside the visible pane.
+PTY pixel dimensions exclude the padding, while selection autoscroll measures
+the whole pane. Libghostty-vt still receives the existing physical cell metrics
+for Kitty image placement. Native Linux CI runs the view's grid, resize,
+selection and image regression tests. See issues #485 and #486 for the sizing
+fix and the separate pointer-coordinate follow-up.
+
 Current verification note:
 
 - ChromeOS/Crostini is acceptable for Linux build/startup smoke checks.
