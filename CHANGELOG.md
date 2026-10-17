@@ -4,17 +4,79 @@ All notable changes to con are documented here.
 
 con is still pre-release, so entries may group related beta work while the product shape is stabilizing.
 
-## `v0.1.0-beta.139`
+## `v0.1.0-beta.139` - 2026-10-17
+
+### Changed
+
+**Terminal Identities**
+
+- Tabs and surfaces recognize common editors, language runtimes and developer
+  tools through their retained process observations, with colored application
+  identities. Unknown programs keep the terminal icon; terminal output does not
+  determine application identity. Font-based identities use matched optical
+  sizing and centering alongside the existing bitmap icons.
+  _(PR [#488](https://github.com/nowledge-co/con-terminal/pull/488) by [@wey-gu](https://github.com/wey-gu))_
+
+**App Icon**
+
+- Tail A6 uses the updated artwork with its subtle built-in shadow across the
+  app icon picker and platform packaging.
+  _(PR [#488](https://github.com/nowledge-co/con-terminal/pull/488) by [@wey-gu](https://github.com/wey-gu))_
+
+**macOS**
+
+- The terminal sits in a subtly rounded canvas, with an elevated input tray
+  aligned to the pane edges. Expanded vertical tabs bring window controls into
+  the sidebar, leaving more height for terminal content. Compact navigation
+  takes less vertical space, and the input tray fades in place rather than
+  sliding the terminal on every animation frame.
+  A single tab without sidebars keeps the clean, edge-to-edge terminal layout.
+  _(PR [#488](https://github.com/nowledge-co/con-terminal/pull/488) by [@wey-gu](https://github.com/wey-gu))_
+- Single and split terminals share quiet rounded edges with both input areas,
+  with consistent spacing between panes, the command bar and the window edge.
+  The agent panel stays unframed, with its composer aligned to the terminal's
+  lower edge and equal visible clearance on its left, right and bottom.
+  Surface tabs use clearer labels,
+  and compact-tab details use a stable popover with grouped pane context.
+  _(PR [#488](https://github.com/nowledge-co/con-terminal/pull/488) by [@wey-gu](https://github.com/wey-gu))_
+- Pane resize handles use a short, centered grip on hover and while dragging,
+  leaving the full gutter available for resizing.
+  _(PR [#488](https://github.com/nowledge-co/con-terminal/pull/488) by [@wey-gu](https://github.com/wey-gu))_
+- The floating input bar fades its background and controls together, without
+  first opening a separate empty strip. Pane clipping also recovers when native
+  backing layers change without a layout-size change.
+  _(PR [#488](https://github.com/nowledge-co/con-terminal/pull/488) by [@wey-gu](https://github.com/wey-gu))_
+- Dragging a pane keeps vertical tabs in the sidebar instead of briefly opening
+  a horizontal strip. Pane drag labels, tab details and the floating command
+  bar use a more compact, consistent layout.
+  _(PR [#488](https://github.com/nowledge-co/con-terminal/pull/488) by [@wey-gu](https://github.com/wey-gu))_
+- Pane headers share application identities with tab navigation. Pane cards and
+  input surfaces share the same fine edge treatment. Files and
+  Search also give terminal content the top row when the left column has room
+  for the window controls.
+  _(PR [#488](https://github.com/nowledge-co/con-terminal/pull/488) by [@wey-gu](https://github.com/wey-gu))_
 
 ### Fixed
 
 **Linux**
 
-- Full-screen terminal programs such as Claude Code now fit inside the pane.
-  Con used to report a few more columns and rows than it draws, most at
-  fractional display scales. Their right edge was cut off, and their last row
-  sat behind the input bar.
+- Full-screen terminal programs such as Claude Code fit within the pane,
+  including at fractional display scales. Their right edge and last row no
+  longer extend beyond the visible terminal area.
   _(PR [#487](https://github.com/nowledge-co/con-terminal/pull/487) by [@Towerism](https://github.com/Towerism))_
+
+**macOS**
+
+- Closing the other panes no longer leaves the surviving terminal clipped to
+  its former split area. Pane drop previews follow rounded pane edges and
+  account for the space occupied by dividers.
+  _(PR [#488](https://github.com/nowledge-co/con-terminal/pull/488) by [@wey-gu](https://github.com/wey-gu))_
+- Rounded terminal clipping also initializes view-backed scroll hosts, rather
+  than silently skipping masks when only the terminal child has a backing layer.
+  _(PR [#488](https://github.com/nowledge-co/con-terminal/pull/488) by [@wey-gu](https://github.com/wey-gu))_
+- Full-screen terminal applications can extend their edge colors into unused
+  grid padding on macOS. Explicit native padding-color settings stay unchanged.
+  _(PR [#488](https://github.com/nowledge-co/con-terminal/pull/488) by [@wey-gu](https://github.com/wey-gu))_
 
 ## `v0.1.0-beta.138` - 2026-10-16
 

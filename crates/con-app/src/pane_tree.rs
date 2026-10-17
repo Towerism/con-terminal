@@ -14,10 +14,60 @@ use crate::editor_view::EditorView;
 use crate::sidebar::{DraggedTab, DraggedTabOrigin};
 use crate::terminal_pane::TerminalPane;
 use crate::ui_scale::{mono_icon_px, mono_px};
+#[cfg(target_os = "macos")]
+use gpui_component::ElementExt;
 
 const RESTORED_SCREEN_TEXT_MAX_LINES: usize = 600;
 const RESTORED_SCREEN_TEXT_MAX_BYTES: usize = 128 * 1024;
 const EDITOR_MERGED_BAR_HEIGHT: f32 = 28.0;
+
+#[cfg(target_os = "macos")]
+fn pane_resize_handle(
+    id: SplitId,
+    direction: SplitDirection,
+    active: bool,
+    foreground: Hsla,
+    dark: bool,
+) -> Stateful<Div> {
+    let group: SharedString = format!("pane-resize-{id}").into();
+    let grip = div()
+        .debug_selector(|| "pane-resize-grip".into())
+        .rounded_full()
+        .bg(foreground.opacity(if active { 0.34 } else { 0.0 }))
+        .group_hover(group.clone(), |s| {
+            s.bg(foreground.opacity(if active {
+                0.34
+            } else if dark {
+                0.24
+            } else {
+                0.18
+            }))
+        });
+    let handle = div()
+        .id(("pane-resize-hitbox", id))
+        .debug_selector(|| "pane-resize-hitbox".into())
+        .group(group)
+        .absolute()
+        .flex()
+        .items_center()
+        .justify_center();
+    match direction {
+        SplitDirection::Horizontal => handle
+            .top_0()
+            .bottom_0()
+            .left(px(-crate::workspace::frame::PANE_INSET))
+            .w(px(crate::workspace::frame::CARD_GAP))
+            .cursor_col_resize()
+            .child(grip.w(px(2.0)).h(px(28.0)).max_h(relative(0.35))),
+        SplitDirection::Vertical => handle
+            .left_0()
+            .right_0()
+            .top(px(-crate::workspace::frame::PANE_INSET))
+            .h(px(crate::workspace::frame::CARD_GAP))
+            .cursor_row_resize()
+            .child(grip.h(px(2.0)).w(px(28.0)).max_w(relative(0.35))),
+    }
+}
 
 struct EditorChromeState {
     show_pane_controls: bool,
@@ -1118,6 +1168,7 @@ impl PaneTree {
         tab_accent_color: Option<con_core::session::TabAccentColor>,
         tab_accent_inactive_alpha: f32,
         hide_pane_title_bar: bool,
+        canvas_depth: f32,
         cx: &App,
     ) -> AnyElement {
         let focus_surface_cb = std::sync::Arc::new(focus_surface_cb);
@@ -1143,12 +1194,14 @@ impl PaneTree {
                 close_pane_cb.clone(),
                 toggle_zoom_cb.clone(),
                 rename_editor.clone(),
+                divider_color,
                 has_splits,
                 zoomed_pane_id,
                 session_id,
                 tab_accent_color,
                 tab_accent_inactive_alpha,
                 hide_pane_title_bar,
+                canvas_depth,
                 cx,
             )
         {
@@ -1175,6 +1228,7 @@ impl PaneTree {
             tab_accent_color,
             tab_accent_inactive_alpha,
             hide_pane_title_bar,
+            canvas_depth,
             cx,
         )
     }
@@ -1274,24 +1328,26 @@ impl PaneTree {
                 let ratio = (*ratio).clamp(0.0, 1.0);
                 match direction {
                     SplitDirection::Horizontal => {
-                        let first_width = bounds.size.width * ratio;
-                        let second_width = bounds.size.width - first_width;
+                        let available = (bounds.size.width - px(1.0)).max(px(0.0));
+                        let first_width = available * ratio;
+                        let second_width = available - first_width;
                         let first_bounds =
                             Bounds::new(bounds.origin, size(first_width, bounds.size.height));
                         let second_bounds = Bounds::new(
-                            point(bounds.origin.x + first_width, bounds.origin.y),
+                            point(bounds.origin.x + first_width + px(1.0), bounds.origin.y),
                             size(second_width, bounds.size.height),
                         );
                         Self::collect_pane_bounds(first, first_bounds, result);
                         Self::collect_pane_bounds(second, second_bounds, result);
                     }
                     SplitDirection::Vertical => {
-                        let first_height = bounds.size.height * ratio;
-                        let second_height = bounds.size.height - first_height;
+                        let available = (bounds.size.height - px(1.0)).max(px(0.0));
+                        let first_height = available * ratio;
+                        let second_height = available - first_height;
                         let first_bounds =
                             Bounds::new(bounds.origin, size(bounds.size.width, first_height));
                         let second_bounds = Bounds::new(
-                            point(bounds.origin.x, bounds.origin.y + first_height),
+                            point(bounds.origin.x, bounds.origin.y + first_height + px(1.0)),
                             size(bounds.size.width, second_height),
                         );
                         Self::collect_pane_bounds(first, first_bounds, result);
@@ -1930,7 +1986,7 @@ impl PaneTree {
         toggle_zoom_cb: PaneCallback,
         rename_editor: Option<SurfaceRenameEditor>,
         divider_color: Hsla,
-        resize_cover_color: Hsla,
+        _resize_cover_color: Hsla,
         active_drag_split_id: Option<SplitId>,
         tree_has_splits: bool,
         zoomed_pane_id: Option<PaneId>,
@@ -1938,6 +1994,7 @@ impl PaneTree {
         tab_accent_color: Option<con_core::session::TabAccentColor>,
         tab_accent_inactive_alpha: f32,
         hide_pane_title_bar: bool,
+        canvas_depth: f32,
         cx: &App,
     ) -> AnyElement {
         match node {
@@ -1954,12 +2011,14 @@ impl PaneTree {
                 close_pane_cb,
                 toggle_zoom_cb,
                 rename_editor,
+                divider_color,
                 tree_has_splits,
                 zoomed_pane_id,
                 session_id,
                 tab_accent_color,
                 tab_accent_inactive_alpha,
                 hide_pane_title_bar,
+                canvas_depth,
                 cx,
             ),
             PaneNode::Split {
@@ -2003,7 +2062,7 @@ impl PaneTree {
                     toggle_zoom_cb_first,
                     rename_editor_first,
                     divider_color,
-                    resize_cover_color,
+                    _resize_cover_color,
                     active_drag_split_id,
                     tree_has_splits,
                     zoomed_pane_id,
@@ -2011,6 +2070,7 @@ impl PaneTree {
                     tab_accent_color,
                     tab_accent_inactive_alpha,
                     hide_pane_title_bar,
+                    canvas_depth,
                     cx,
                 );
                 let second_el = Self::render_node(
@@ -2025,7 +2085,7 @@ impl PaneTree {
                     toggle_zoom_cb_second,
                     rename_editor_second,
                     divider_color,
-                    resize_cover_color,
+                    _resize_cover_color,
                     active_drag_split_id,
                     tree_has_splits,
                     zoomed_pane_id,
@@ -2033,6 +2093,7 @@ impl PaneTree {
                     tab_accent_color,
                     tab_accent_inactive_alpha,
                     hide_pane_title_bar,
+                    canvas_depth,
                     cx,
                 );
 
@@ -2040,6 +2101,15 @@ impl PaneTree {
                 let is_active_drag_divider = active_drag_split_id == Some(sid);
                 let divider = match dir {
                     SplitDirection::Horizontal => {
+                        #[cfg(target_os = "macos")]
+                        let handle = pane_resize_handle(
+                            sid,
+                            dir,
+                            is_active_drag_divider,
+                            cx.theme().foreground,
+                            cx.theme().is_dark(),
+                        );
+                        #[cfg(not(target_os = "macos"))]
                         let handle = div()
                             .absolute()
                             .top_0()
@@ -2047,8 +2117,8 @@ impl PaneTree {
                             .left(px(-2.0))
                             .w(px(5.0))
                             .cursor_col_resize()
-                            .bg(if is_active_drag_divider {
-                                resize_cover_color
+                            .bg(if is_active_drag_divider && !cfg!(target_os = "macos") {
+                                _resize_cover_color
                             } else {
                                 gpui::transparent_black()
                             });
@@ -2069,6 +2139,15 @@ impl PaneTree {
                             ))
                     }
                     SplitDirection::Vertical => {
+                        #[cfg(target_os = "macos")]
+                        let handle = pane_resize_handle(
+                            sid,
+                            dir,
+                            is_active_drag_divider,
+                            cx.theme().foreground,
+                            cx.theme().is_dark(),
+                        );
+                        #[cfg(not(target_os = "macos"))]
                         let handle = div()
                             .absolute()
                             .left_0()
@@ -2076,8 +2155,8 @@ impl PaneTree {
                             .top(px(-2.0))
                             .h(px(5.0))
                             .cursor_row_resize()
-                            .bg(if is_active_drag_divider {
-                                resize_cover_color
+                            .bg(if is_active_drag_divider && !cfg!(target_os = "macos") {
+                                _resize_cover_color
                             } else {
                                 gpui::transparent_black()
                             });
@@ -2142,12 +2221,14 @@ impl PaneTree {
         close_pane_cb: PaneCallback,
         toggle_zoom_cb: PaneCallback,
         rename_editor: Option<SurfaceRenameEditor>,
+        surround_color: Hsla,
         tree_has_splits: bool,
         zoomed_pane_id: Option<PaneId>,
         session_id: u64,
         tab_accent_color: Option<con_core::session::TabAccentColor>,
         tab_accent_inactive_alpha: f32,
         hide_pane_title_bar: bool,
+        canvas_depth: f32,
         cx: &App,
     ) -> Option<AnyElement> {
         match node {
@@ -2164,12 +2245,14 @@ impl PaneTree {
                 close_pane_cb,
                 toggle_zoom_cb,
                 rename_editor,
+                surround_color,
                 tree_has_splits,
                 zoomed_pane_id,
                 session_id,
                 tab_accent_color,
                 tab_accent_inactive_alpha,
                 hide_pane_title_bar,
+                canvas_depth,
                 cx,
             )),
             PaneNode::Leaf { .. } => None,
@@ -2184,12 +2267,14 @@ impl PaneTree {
                 close_pane_cb.clone(),
                 toggle_zoom_cb.clone(),
                 rename_editor.clone(),
+                surround_color,
                 tree_has_splits,
                 zoomed_pane_id,
                 session_id,
                 tab_accent_color,
                 tab_accent_inactive_alpha,
                 hide_pane_title_bar,
+                canvas_depth,
                 cx,
             )
             .or_else(|| {
@@ -2204,12 +2289,14 @@ impl PaneTree {
                     close_pane_cb,
                     toggle_zoom_cb,
                     rename_editor,
+                    surround_color,
                     tree_has_splits,
                     zoomed_pane_id,
                     session_id,
                     tab_accent_color,
                     tab_accent_inactive_alpha,
                     hide_pane_title_bar,
+                    canvas_depth,
                     cx,
                 )
             }),
@@ -2225,7 +2312,21 @@ impl PaneTree {
     ) -> Hsla {
         // Keep pane chrome opaque. Text rendered over translucent blurred/native
         // backing picks up rough glyph edges on macOS.
-        theme.title_bar.opacity(1.0)
+        #[cfg(target_os = "macos")]
+        {
+            theme
+                .background
+                .blend(
+                    theme
+                        .foreground
+                        .opacity(if _is_focused { 0.012 } else { 0.004 }),
+                )
+                .opacity(1.0)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            theme.title_bar.opacity(1.0)
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2233,6 +2334,7 @@ impl PaneTree {
         pane_id: PaneId,
         session_id: u64,
         title: String,
+        _identity_icon: &'static str,
         is_focused: bool,
         has_splits: bool,
         is_zoomed: bool,
@@ -2338,24 +2440,48 @@ impl PaneTree {
             .debug_selector(move || format!("pane-title-label-{pane_id}"))
             .w_full()
             .min_w_0()
-            .px(title_inset)
+            .map(|label| {
+                #[cfg(target_os = "macos")]
+                {
+                    label
+                        .pl(px(10.0))
+                        .pr(title_inset)
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .debug_selector(|| "pane-identity-icon".into())
+                                .size(px(14.0))
+                                .flex_shrink_0()
+                                .child(crate::assets::tab_identity_icon(
+                                    crate::assets::tab_identity_asset(_identity_icon),
+                                    px(14.0),
+                                    title_color,
+                                )),
+                        )
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    label.px(title_inset).text_center()
+                }
+            })
             .truncate()
             .text_size(px(12.0))
             .line_height(px(16.0))
             .font_family(theme.font_family.clone())
             .font_weight(FontWeight::MEDIUM)
             .text_color(title_color)
-            .text_center()
             .tooltip({
                 let title = title.clone();
                 move |window, cx| Tooltip::new(title.clone()).build(window, cx)
             })
-            .child(SharedString::from(title));
+            .child(div().min_w_0().truncate().child(SharedString::from(title)));
         let focus_cb_bar = focus_pane_cb.clone();
         let dragged = DraggedTab {
             session_id,
             label: drag_label,
-            icon: "phosphor/terminal.svg",
+            icon: _identity_icon,
             origin: DraggedTabOrigin::Pane,
             preview_constraint: None,
             pane_id: Some(pane_id),
@@ -2363,6 +2489,11 @@ impl PaneTree {
         // The whole title bar is draggable. The visible pane drag preview is
         // rendered by Workspace, centred at the live cursor position.
         let bar_bg = Self::pane_chrome_bg(theme, is_focused, tab_accent_inactive_alpha);
+        let bar_bg = if is_focused && !cfg!(target_os = "macos") {
+            bar_bg.blend(theme.foreground.opacity(0.025))
+        } else {
+            bar_bg
+        };
         let bar = div()
             .id(ElementId::Name(format!("pane-title-bar-{pane_id}").into()))
             .debug_selector(move || format!("pane-title-bar-{pane_id}"))
@@ -2373,10 +2504,18 @@ impl PaneTree {
             .items_center()
             .h(px(24.0))
             .w_full()
-            .bg(if is_focused {
-                bar_bg.blend(theme.foreground.opacity(0.025))
-            } else {
-                bar_bg
+            .map(|bar| {
+                #[cfg(target_os = "macos")]
+                {
+                    bar.child(crate::workspace::frame::pane_header_background(
+                        bar_bg,
+                        crate::workspace::frame::PANE_RADIUS,
+                    ))
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    bar.bg(bar_bg)
+                }
             })
             .cursor_grab()
             .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
@@ -2443,11 +2582,18 @@ impl PaneTree {
             .flex_shrink_0()
             .gap(px(2.0))
             .px(px(6.0))
-            .bg(Self::pane_chrome_bg(
-                theme,
-                is_focused,
-                tab_accent_inactive_alpha,
-            ))
+            .map(|bar| {
+                let color = Self::pane_chrome_bg(theme, is_focused, tab_accent_inactive_alpha);
+                #[cfg(target_os = "macos")]
+                {
+                    bar.relative()
+                        .child(crate::workspace::frame::header_background(color))
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    bar.bg(color)
+                }
+            })
             .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                 focus_cb_bar(pane_id, window, cx);
             });
@@ -2747,12 +2893,14 @@ impl PaneTree {
         close_pane_cb: PaneCallback,
         toggle_zoom_cb: PaneCallback,
         rename_editor: Option<SurfaceRenameEditor>,
+        _surround_color: Hsla,
         tree_has_splits: bool,
         zoomed_pane_id: Option<PaneId>,
         session_id: u64,
         tab_accent_color: Option<con_core::session::TabAccentColor>,
         tab_accent_inactive_alpha: f32,
         hide_pane_title_bar: bool,
+        _canvas_depth: f32,
         cx: &App,
     ) -> AnyElement {
         // ── Editor pane — file tabs and pane controls share one row ───────
@@ -2833,6 +2981,10 @@ impl PaneTree {
             surfaces.len() > 1 || active.owner.is_some() || active.title.is_some();
 
         // No splits → no title bar, no surface strip (single-pane layout)
+        // macOS must still run the pane clip prepaint below. An existing
+        // surface can arrive here after closing a sibling, zooming or moving
+        // into its own tab, and retains its old split mask until cleared.
+        #[cfg(not(target_os = "macos"))]
         if !tree_has_splits && !show_surface_strip {
             return div().size_full().child(terminal).into_any_element();
         }
@@ -2863,6 +3015,7 @@ impl PaneTree {
                 pane_id,
                 session_id,
                 pane_title,
+                active.terminal.presentation_icon(),
                 is_focused,
                 tree_has_splits,
                 is_zoomed,
@@ -2878,20 +3031,8 @@ impl PaneTree {
 
         // Surface strip — only when there are multiple surfaces or an owner/title
         if show_surface_strip {
-            let rail_label = format!(
-                "{} tab{}",
-                surfaces.len(),
-                if surfaces.len() == 1 { "" } else { "s" }
-            );
             let strip_bg = Self::pane_chrome_bg(theme, is_focused, tab_accent_inactive_alpha);
-            let rail_bg = if is_focused {
-                theme.tab_bar_segmented.opacity(0.72)
-            } else {
-                theme.tab_bar_segmented.opacity(0.58)
-            };
-            let rail_text = theme
-                .foreground
-                .opacity(if is_focused { 0.66 } else { 0.50 });
+            let rail_bg = theme.transparent;
 
             let mut surface_rail = div()
                 .id(("surface-tab-strip", pane_id))
@@ -2903,37 +3044,9 @@ impl PaneTree {
                 .max_w(relative(1.0))
                 .px(px(4.0))
                 .rounded(px(7.0))
-                .font_family(theme.mono_font_family.clone())
+                .font_family(theme.font_family.clone())
                 .bg(rail_bg)
                 .overflow_x_scroll();
-
-            surface_rail = surface_rail.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .flex_shrink_0()
-                    .pl(px(2.0))
-                    .pr(px(4.0))
-                    .text_size(px(11.0))
-                    .line_height(px(13.0))
-                    .font_weight(FontWeight::NORMAL)
-                    .text_color(rail_text)
-                    .child(
-                        svg()
-                            .path("phosphor/stack-fill.svg")
-                            .size(mono_icon_px(theme, 9.0))
-                            .text_color(rail_text.opacity(0.82)),
-                    )
-                    .child(SharedString::from(rail_label)),
-            );
-            surface_rail = surface_rail.child(
-                div()
-                    .w(px(1.0))
-                    .h(px(12.0))
-                    .flex_shrink_0()
-                    .bg(theme.foreground.opacity(0.14)),
-            );
 
             for (index, surface) in surfaces.iter().enumerate() {
                 let is_active = surface.id == active_surface_id;
@@ -2942,12 +3055,19 @@ impl PaneTree {
                     .clone()
                     .unwrap_or_else(|| format!("Surface {}", index + 1));
                 let color = if is_active {
-                    theme.foreground.opacity(0.90)
+                    theme.foreground
                 } else {
-                    theme.foreground.opacity(0.54)
+                    theme.muted_foreground
                 };
                 let bg = if is_active {
-                    theme.tab_active.opacity(0.96)
+                    theme
+                        .title_bar
+                        .blend(
+                            theme
+                                .foreground
+                                .opacity(if theme.is_dark() { 0.10 } else { 0.055 }),
+                        )
+                        .opacity(1.0)
                 } else {
                     theme.transparent
                 };
@@ -2984,7 +3104,7 @@ impl PaneTree {
                     .flex_shrink_0()
                     .pl(px(6.0))
                     .pr(if can_close { px(2.0) } else { px(8.0) })
-                    .rounded(px(6.0))
+                    .rounded_full()
                     .bg(bg)
                     .cursor_pointer()
                     .hover(move |s| s.bg(hover_bg))
@@ -2994,13 +3114,11 @@ impl PaneTree {
                     .on_double_click(move |_, window, cx| {
                         rename_cb(sid, window, cx);
                     })
-                    .child(
-                        svg()
-                            .path("phosphor/terminal.svg")
-                            .size(mono_icon_px(theme, 10.0))
-                            .flex_shrink_0()
-                            .text_color(icon_color),
-                    )
+                    .child(crate::assets::tab_identity_icon(
+                        crate::assets::tab_identity_asset(surface.terminal.presentation_icon()),
+                        mono_icon_px(theme, 12.0),
+                        icon_color,
+                    ))
                     .when_some(editing_input, |tab, input| {
                         tab.child(
                             div().w(px(104.0)).child(
@@ -3023,7 +3141,7 @@ impl PaneTree {
                                     .truncate()
                                     .text_size(px(12.0))
                                     .line_height(px(14.0))
-                                    .font_family(theme.mono_font_family.clone())
+                                    .font_family(theme.font_family.clone())
                                     .font_weight(if is_active {
                                         FontWeight::MEDIUM
                                     } else {
@@ -3103,13 +3221,76 @@ impl PaneTree {
                 .w_full()
                 .px(px(6.0))
                 .py(px(2.0))
-                .bg(strip_bg)
+                .map(|bar| {
+                    #[cfg(target_os = "macos")]
+                    {
+                        bar.relative()
+                            .child(crate::workspace::frame::pane_header_background(
+                                strip_bg,
+                                if tree_has_splits && !hide_pane_title_bar {
+                                    0.0
+                                } else {
+                                    crate::workspace::frame::pane_card_geometry(
+                                        tree_has_splits,
+                                        _canvas_depth,
+                                    )
+                                    .1
+                                },
+                            ))
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        bar.bg(strip_bg)
+                    }
+                })
                 .child(surface_rail);
 
             col = col.child(strip);
         }
 
-        col.child(terminal_host).into_any_element()
+        let col = col.child(terminal_host);
+        #[cfg(target_os = "macos")]
+        {
+            let terminals = surfaces
+                .iter()
+                .map(|surface| surface.terminal.clone())
+                .collect::<Vec<_>>();
+            let (inset, radius) =
+                crate::workspace::frame::pane_card_geometry(tree_has_splits, _canvas_depth);
+            let pane = col
+                .relative()
+                .id(("terminal-pane-card", pane_id))
+                .on_prepaint(move |bounds, window, cx| {
+                    for terminal in &terminals {
+                        terminal.set_pane_clip(bounds, radius, window, cx);
+                    }
+                });
+            div()
+                .relative()
+                .size_full()
+                .p(px(inset))
+                .child(pane)
+                .when(radius > 0.0, |container| {
+                    container
+                        .child(active.terminal.pane_surround(
+                            _surround_color,
+                            radius / crate::workspace::frame::PANE_RADIUS,
+                        ))
+                        .child(
+                            crate::workspace::frame::card_edge(
+                                radius,
+                                theme.foreground,
+                                theme.is_dark(),
+                            )
+                            .inset(px(inset)),
+                        )
+                })
+                .into_any_element()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            col.into_any_element()
+        }
     }
 
     fn find_focused_pane(node: &PaneNode, window: &Window, cx: &App) -> Option<PaneId> {
@@ -3521,6 +3702,155 @@ mod tests {
     use super::*;
     use ::core::prelude::v1::test;
 
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn resize_grip_is_centered_and_keeps_the_full_gutter_clickable(cx: &mut gpui::TestAppContext) {
+        struct GripView {
+            direction: SplitDirection,
+            active: bool,
+            pressed: usize,
+        }
+        impl Render for GripView {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let divider = div().absolute().map(|divider| match self.direction {
+                    SplitDirection::Horizontal => {
+                        divider.left(px(99.5)).top_0().w(px(1.0)).h_full()
+                    }
+                    SplitDirection::Vertical => divider.top(px(59.5)).left_0().h(px(1.0)).w_full(),
+                });
+                div().relative().w(px(200.0)).h(px(120.0)).child(
+                    divider.child(
+                        pane_resize_handle(0, self.direction, self.active, gpui::black(), false)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.active = true;
+                                    this.pressed += 1;
+                                    cx.notify();
+                                }),
+                            ),
+                    ),
+                )
+            }
+        }
+        let (view, cx) = cx.add_window_view(|_, _| GripView {
+            direction: SplitDirection::Horizontal,
+            active: false,
+            pressed: 0,
+        });
+        for direction in [SplitDirection::Horizontal, SplitDirection::Vertical] {
+            view.update(cx, |view, cx| {
+                view.direction = direction;
+                view.active = false;
+                cx.notify();
+            });
+            let grip = cx.debug_bounds("pane-resize-grip").unwrap();
+            let hitbox = cx.debug_bounds("pane-resize-hitbox").unwrap();
+            assert_eq!(grip.center(), point(px(100.0), px(60.0)));
+            assert_eq!(grip.center(), hitbox.center());
+            let click = match direction {
+                SplitDirection::Horizontal => {
+                    assert_eq!(grip.size, size(px(2.0), px(28.0)));
+                    assert_eq!(hitbox.size, size(px(7.0), px(120.0)));
+                    point(hitbox.center().x, px(4.0))
+                }
+                SplitDirection::Vertical => {
+                    assert_eq!(grip.size, size(px(28.0), px(2.0)));
+                    assert_eq!(hitbox.size, size(px(200.0), px(7.0)));
+                    point(px(4.0), hitbox.center().y)
+                }
+            };
+            cx.simulate_click(click, Modifiers::default());
+            view.read_with(cx, |view, _| assert!(view.active));
+            assert_eq!(cx.debug_bounds("pane-resize-grip").unwrap(), grip);
+        }
+        view.read_with(cx, |view, _| assert_eq!(view.pressed, 2));
+    }
+
+    #[cfg(target_os = "macos")]
+    struct SinglePaneClipTestView {
+        tree: PaneTree,
+        terminal: Entity<crate::ghostty_view::GhosttyView>,
+        canvas_depth: f32,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Render for SinglePaneClipTestView {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.tree.render(
+                1,
+                |_, _, _, _| {},
+                |_, _, _| {},
+                |_, _, _| {},
+                |_, _, _| {},
+                |_, _, _| {},
+                |_, _, _| {},
+                |_, _, _| {},
+                None,
+                cx.theme().title_bar,
+                cx.theme().background,
+                None,
+                0.08,
+                false,
+                self.canvas_depth,
+                cx,
+            )
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn single_pane_render_clears_a_reused_split_mask(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let app = std::sync::Arc::new(
+            con_ghostty::GhosttyApp::new(
+                None, None, None, None, None, None, None, None, None, None, None, None, None, false,
+            )
+            .expect("native Ghostty app"),
+        );
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let terminal =
+                cx.new(|cx| crate::ghostty_view::GhosttyView::new(app, None, None, 14.0, cx));
+            let pane = TerminalPane::new(terminal.clone());
+            pane.set_pane_clip(
+                Bounds::new(point(px(100.0), px(0.0)), size(px(200.0), px(300.0))),
+                7.0,
+                window,
+                cx,
+            );
+            SinglePaneClipTestView {
+                tree: PaneTree::new(pane),
+                terminal,
+                canvas_depth: 0.0,
+            }
+        });
+        cx.simulate_resize(size(px(600.0), px(400.0)));
+        view.update(cx, |view, cx| {
+            let (bounds, radius) = view
+                .terminal
+                .read(cx)
+                .pane_clip_for_test()
+                .expect("single pane must execute clip prepaint");
+            assert_eq!(radius, 0.0, "the old split mask must be removed");
+            assert_eq!(
+                bounds,
+                Bounds::new(point(px(0.0), px(0.0)), size(px(600.0), px(400.0)))
+            );
+        });
+        view.update(cx, |view, cx| {
+            view.canvas_depth = 1.0;
+            cx.notify();
+        });
+        view.read_with(cx, |view, cx| {
+            let (bounds, radius) = view.terminal.read(cx).pane_clip_for_test().unwrap();
+            assert_eq!(radius, crate::workspace::frame::PANE_RADIUS);
+            assert_eq!(
+                bounds,
+                Bounds::new(point(px(3.0), px(3.0)), size(px(594.0), px(394.0)))
+            );
+        });
+    }
+
     struct PaneHeaderTestView {
         width: f32,
         focused: bool,
@@ -3541,6 +3871,7 @@ mod tests {
                     0,
                     0,
                     "项目 / a long shell title that must not move the controls".into(),
+                    crate::terminal_identity::TERMINAL,
                     self.focused,
                     true,
                     self.zoomed,
@@ -3634,6 +3965,7 @@ mod tests {
                     pane_id,
                     0,
                     format!("Pane {pane_id}"),
+                    crate::terminal_identity::TERMINAL,
                     pane_id == 0,
                     true,
                     false,
@@ -3864,6 +4196,41 @@ mod tests {
                 active_surface_id: 0,
             },
         }
+    }
+
+    #[test]
+    fn pane_drop_bounds_reserve_each_rendered_divider() {
+        let node = PaneNode::Split {
+            split_id: 1,
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(empty_leaf(0)),
+            second: Box::new(PaneNode::Split {
+                split_id: 2,
+                direction: SplitDirection::Vertical,
+                ratio: 0.25,
+                first: Box::new(empty_leaf(1)),
+                second: Box::new(empty_leaf(2)),
+            }),
+        };
+        let mut bounds = Vec::new();
+        PaneTree::collect_pane_bounds(
+            &node,
+            Bounds::new(point(px(10.0), px(20.0)), size(px(601.0), px(401.0))),
+            &mut bounds,
+        );
+        assert_eq!(
+            bounds[0].1,
+            Bounds::new(point(px(10.0), px(20.0)), size(px(300.0), px(401.0)))
+        );
+        assert_eq!(
+            bounds[1].1,
+            Bounds::new(point(px(311.0), px(20.0)), size(px(300.0), px(100.0)))
+        );
+        assert_eq!(
+            bounds[2].1,
+            Bounds::new(point(px(311.0), px(121.0)), size(px(300.0), px(300.0)))
+        );
     }
 
     fn leaf_id(node: &PaneNode) -> PaneId {

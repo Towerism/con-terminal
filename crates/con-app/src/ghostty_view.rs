@@ -112,6 +112,17 @@ struct NativeBackingSync {
 
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
+    fn con_terminal_canvas_generation(view: *mut c_void) -> u64;
+    fn con_terminal_canvas_apply_clip(view: *mut c_void);
+    fn con_terminal_canvas_clip_is_attached(view: *mut c_void) -> bool;
+    fn con_terminal_pane_set_clip(
+        view: *mut c_void,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        radius: f64,
+    ) -> bool;
     fn objc_getAssociatedObject(object: id, key: *const c_void) -> id;
     fn objc_setAssociatedObject(object: id, key: *const c_void, value: id, policy: usize);
     fn con_ghostty_surface_install_backing_observer(view: *mut c_void, surface: *mut c_void);
@@ -359,6 +370,10 @@ pub struct GhosttyView {
     #[cfg(target_os = "macos")]
     pending_native_layout: bool,
     #[cfg(target_os = "macos")]
+    native_canvas_generation: u64,
+    #[cfg(target_os = "macos")]
+    native_pane_clip: Option<(Bounds<Pixels>, f32)>,
+    #[cfg(target_os = "macos")]
     mouse_cursor: CursorStyle,
     #[cfg(target_os = "macos")]
     pending_mouse_visible: Cell<Option<bool>>,
@@ -457,6 +472,10 @@ impl GhosttyView {
             native_underlay_color: None,
             #[cfg(target_os = "macos")]
             pending_native_layout: false,
+            #[cfg(target_os = "macos")]
+            native_canvas_generation: 0,
+            #[cfg(target_os = "macos")]
+            native_pane_clip: None,
             #[cfg(target_os = "macos")]
             mouse_cursor: CursorStyle::IBeam,
             #[cfg(target_os = "macos")]
@@ -1386,8 +1405,9 @@ impl GhosttyView {
             let _: () = msg_send![host, setHasHorizontalScroller:NO];
             let _: () = msg_send![host, setAutohidesScrollers:NO];
             let _: () = msg_send![host, setUsesPredominantAxisScrolling:YES];
-            let _: () =
-                msg_send![host, setAutoresizingMask:NS_VIEW_WIDTH_SIZABLE | NS_VIEW_HEIGHT_SIZABLE];
+            // GPUI owns pane geometry. The host must not follow the entire
+            // window's autoresizing before or after Con commits a pane layout.
+            let _: () = msg_send![host, setAutoresizingMask:0usize];
             let _: () = msg_send![host, setAutoresizesSubviews:YES];
             let _: () = msg_send![
                 host,
@@ -1414,7 +1434,7 @@ impl GhosttyView {
             let _: () = msg_send![surface, setWantsLayer:YES];
             let _: () = msg_send![
                 surface,
-                setAutoresizingMask:NS_VIEW_WIDTH_SIZABLE | NS_VIEW_HEIGHT_SIZABLE
+                setAutoresizingMask:0usize
             ];
             let _: () = msg_send![
                 surface,
@@ -1802,8 +1822,50 @@ impl GhosttyView {
     }
 
     #[cfg(target_os = "macos")]
+    pub(crate) fn set_pane_clip(&mut self, bounds: Bounds<Pixels>, radius: f32, window: &Window) {
+        let bounds = crate::terminal_geometry::snap_terminal_bounds(bounds, window.scale_factor());
+        self.native_pane_clip = Some((bounds, radius));
+        self.apply_pane_clip(window);
+    }
+
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn pane_clip_for_test(&self) -> Option<(Bounds<Pixels>, f32)> {
+        self.native_pane_clip
+    }
+
+    #[cfg(target_os = "macos")]
+    fn apply_pane_clip(&self, window: &Window) {
+        let Some((bounds, radius)) = self.native_pane_clip else {
+            return;
+        };
+        // The transition underlay is shared by the entire window. Only the
+        // individual terminal host belongs to this pane.
+        if let Some(view) = self.host_view {
+            let changed = unsafe {
+                con_terminal_pane_set_clip(
+                    view as *mut c_void,
+                    f64::from(bounds.left()),
+                    f64::from(bounds.top()),
+                    f64::from(bounds.size.width),
+                    f64::from(bounds.size.height),
+                    f64::from(radius),
+                )
+            };
+            if changed {
+                window.request_native_surface_presentation_sync();
+                unsafe {
+                    con_terminal_canvas_apply_clip(view as *mut c_void);
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     fn update_frame(&mut self, bounds: Bounds<Pixels>, window: &Window) {
         let bounds = crate::terminal_geometry::snap_terminal_bounds(bounds, window.scale_factor());
+        let canvas_generation = self.host_view.map_or(0, |host| unsafe {
+            con_terminal_canvas_generation(host as *mut c_void)
+        });
         // `last_bounds` is Con's layout cache, not Ghostty's protocol state.
         // Pane-local surfaces can be hidden, focused, and resized without
         // repainting every sibling; always verify the embedded surface still
@@ -1811,6 +1873,8 @@ impl GhosttyView {
         if self.last_bounds.as_ref() == Some(&bounds)
             && !self.awaiting_first_layout_visibility
             && !self.pending_native_layout
+            && self.native_canvas_generation == canvas_generation
+            && Self::native_host_matches_bounds(self.host_view, bounds)
             && self.terminal_matches_bounds(bounds)
             && self.cached_scale_matches_native(window)
         {
@@ -1818,6 +1882,7 @@ impl GhosttyView {
         }
         let started = perf_trace_enabled().then(Instant::now);
         self.last_bounds = Some(bounds);
+        self.native_canvas_generation = canvas_generation;
         window.request_native_surface_presentation_sync();
         self.sync_native_backing_background();
 
@@ -1830,7 +1895,7 @@ impl GhosttyView {
         if let Some(host_view) = self.host_view {
             unsafe {
                 let superview: id = msg_send![host_view, superview];
-                let super_frame: NSRect = msg_send![superview, frame];
+                let super_frame: NSRect = msg_send![superview, bounds];
                 if let Some(underlay_view) = self.native_underlay_view {
                     let super_bounds: NSRect = msg_send![superview, bounds];
                     let _: () = msg_send![underlay_view, setFrame:super_bounds];
@@ -1856,6 +1921,13 @@ impl GhosttyView {
         }
 
         self.sync_native_scroll_view();
+        self.apply_pane_clip(window);
+        if let Some(host) = self.host_view {
+            unsafe { con_terminal_canvas_apply_clip(host as *mut c_void) };
+        }
+        if let Some(underlay) = self.native_underlay_view {
+            unsafe { con_terminal_canvas_apply_clip(underlay as *mut c_void) };
+        }
 
         if let Some(started) = started {
             let in_live_resize = if let Some(host_view) = self.host_view {
@@ -1886,6 +1958,33 @@ impl GhosttyView {
         }
         self.pending_native_layout = false;
         self.apply_native_visibility();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn native_host_matches_bounds(host: Option<id>, bounds: Bounds<Pixels>) -> bool {
+        let Some(host) = host else {
+            return false;
+        };
+        unsafe {
+            let parent: id = msg_send![host, superview];
+            if parent.is_null() {
+                return false;
+            }
+            let parent_bounds: NSRect = msg_send![parent, bounds];
+            let actual: NSRect = msg_send![host, frame];
+            let overdraw = NATIVE_SEAM_OVERDRAW_PT;
+            let expected = (
+                f64::from(bounds.left()) - overdraw,
+                parent_bounds.size.height - f64::from(bounds.bottom()) - overdraw,
+                f64::from(bounds.size.width) + 2.0 * overdraw,
+                f64::from(bounds.size.height) + 2.0 * overdraw,
+            );
+            (actual.origin.x - expected.0).abs() < 0.01
+                && (actual.origin.y - expected.1).abs() < 0.01
+                && (actual.size.width - expected.2).abs() < 0.01
+                && (actual.size.height - expected.3).abs() < 0.01
+                && con_terminal_canvas_clip_is_attached(host as *mut c_void)
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -1972,6 +2071,16 @@ impl GhosttyView {
             );
             let _: () = msg_send![nsview, setFrame:surface_frame];
             Self::sync_native_layer_geometry(nsview, self.scale_factor);
+            if log::log_enabled!(target: "con::canvas", log::Level::Trace) {
+                let host_frame: NSRect = msg_send![scroll_view, frame];
+                let clip_frame: NSRect = msg_send![content_view, frame];
+                let clip_bounds: NSRect = msg_send![content_view, bounds];
+                let layer: id = msg_send![nsview, layer];
+                let layer_frame: NSRect = msg_send![layer, frame];
+                let layer_bounds: NSRect = msg_send![layer, bounds];
+                let rect = |r: NSRect| (r.origin.x, r.origin.y, r.size.width, r.size.height);
+                log::trace!(target: "con::canvas", "host={:p} host_frame={:?} clip_frame={:?} clip_bounds={:?} surface_frame={:?} layer_frame={:?} layer_bounds={:?}", scroll_view, rect(host_frame), rect(clip_frame), rect(clip_bounds), rect(surface_frame), rect(layer_frame), rect(layer_bounds));
+            }
         }
     }
 
@@ -3279,6 +3388,77 @@ mod tests {
         font, prelude::*, px,
     };
     use gpui_component::Theme;
+
+    #[gpui::test]
+    fn cached_layout_checks_actual_host_geometry_and_mask_attachment() {
+        use cocoa::foundation::{NSPoint, NSRect, NSSize};
+        use objc::{class, msg_send, sel, sel_impl};
+        unsafe extern "C" {
+            fn con_terminal_canvas_set_clip(
+                view: *mut std::ffi::c_void,
+                x: f64,
+                y: f64,
+                width: f64,
+                height: f64,
+                radius: f64,
+            ) -> bool;
+        }
+        unsafe {
+            let parent: cocoa::base::id = msg_send![class!(NSView), alloc];
+            let parent: cocoa::base::id = msg_send![parent, initWithFrame:NSRect::new(NSPoint::new(0.0,0.0), NSSize::new(600.0,400.0))];
+            let frame = |y| NSRect::new(NSPoint::new(8.0, y), NSSize::new(104.0, 84.0));
+            let host: cocoa::base::id = msg_send![class!(NSScrollView), alloc];
+            let host: cocoa::base::id = msg_send![host, initWithFrame:frame(298.0)];
+            let _: () = msg_send![host, setAutoresizingMask:0usize];
+            let _: () = msg_send![host, setWantsLayer:true];
+            let _: () = msg_send![parent, addSubview:host];
+            con_terminal_canvas_set_clip(parent.cast(), 0.0, 0.0, 600.0, 400.0, 0.0);
+            let bounds = gpui::Bounds::new(
+                gpui::point(px(10.0), px(20.0)),
+                gpui::size(px(100.0), px(80.0)),
+            );
+            assert!(super::GhosttyView::native_host_matches_bounds(
+                Some(host),
+                bounds
+            ));
+            let _: () = msg_send![parent, setFrameSize:NSSize::new(800.0,600.0)];
+            let unchanged: NSRect = msg_send![host, frame];
+            assert_eq!(
+                unchanged.origin.y, 298.0,
+                "AppKit must not resize a GPUI-owned pane"
+            );
+            assert!(
+                !super::GhosttyView::native_host_matches_bounds(Some(host), bounds),
+                "parent-space changes cannot reuse the old native frame"
+            );
+            let _: () = msg_send![host, setFrame:frame(498.0)];
+            con_terminal_canvas_set_clip(parent.cast(), 0.0, 0.0, 800.0, 600.0, 0.0);
+            assert!(super::GhosttyView::native_host_matches_bounds(
+                Some(host),
+                bounds
+            ));
+            con_terminal_canvas_set_clip(parent.cast(), 0.0, 0.0, 800.0, 600.0, 8.0);
+            super::con_terminal_canvas_apply_clip(host.cast());
+            assert!(super::GhosttyView::native_host_matches_bounds(
+                Some(host),
+                bounds
+            ));
+            let layer: cocoa::base::id = msg_send![host, layer];
+            let _: () = msg_send![layer,setMask:cocoa::base::nil];
+            assert!(
+                !super::GhosttyView::native_host_matches_bounds(Some(host), bounds),
+                "a detached mask invalidates an otherwise unchanged layout"
+            );
+            super::con_terminal_canvas_apply_clip(host.cast());
+            assert!(super::GhosttyView::native_host_matches_bounds(
+                Some(host),
+                bounds
+            ));
+            let _: () = msg_send![host, removeFromSuperview];
+            let _: () = msg_send![host, release];
+            let _: () = msg_send![parent, release];
+        }
+    }
 
     struct TerminalCanvasTestView {
         pending: std::rc::Rc<std::cell::Cell<bool>>,

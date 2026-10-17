@@ -160,6 +160,9 @@ impl ConWorkspace {
             .clamp(320.0, 480.0)
             .min(popup_available_width));
         let popup_bottom = self.input_bar.read(cx).skill_popup_offset(cx);
+        #[cfg(target_os = "macos")]
+        let popup_bottom = popup_bottom
+            + px((frame::CANVAS_INSET + frame::INPUT_BOTTOM_INSET) * self.canvas_depth_progress);
         let skills = self
             .input_bar
             .read(cx)
@@ -250,6 +253,9 @@ impl ConWorkspace {
             .clamp(320.0, 440.0)
             .min(popup_available_width));
         let popup_bottom = self.input_bar.read(cx).skill_popup_offset(cx);
+        #[cfg(target_os = "macos")]
+        let popup_bottom = popup_bottom
+            + px((frame::CANVAS_INSET + frame::INPUT_BOTTOM_INSET) * self.canvas_depth_progress);
         let candidates = self.input_bar.read(cx).path_completion_candidates();
         let sel = self
             .input_bar
@@ -355,7 +361,17 @@ impl ConWorkspace {
                 let (popup_left, popup_width, popup_bottom) = pane_scope_popup_geometry(
                     terminal_content_left,
                     terminal_content_width,
-                    self.input_bar.read(cx).rendered_height(cx).as_f32(),
+                    self.input_bar.read(cx).rendered_height(cx).as_f32() + {
+                        #[cfg(target_os = "macos")]
+                        {
+                            (frame::CANVAS_INSET + frame::INPUT_BOTTOM_INSET)
+                                * self.canvas_depth_progress
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            0.0
+                        }
+                    },
                     input_bar_progress,
                     crate::ui_scale::mono_density_scale(cx.theme()),
                 );

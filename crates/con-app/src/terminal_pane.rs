@@ -14,11 +14,34 @@ use crate::workspace::ConWorkspace;
 #[derive(Clone)]
 pub struct TerminalPane {
     entity: Entity<GhosttyView>,
+    presentation_icon: std::rc::Rc<std::cell::Cell<&'static str>>,
+    #[cfg(target_os = "macos")]
+    pane_surround: crate::workspace::frame::PaneSurround,
 }
 
 impl TerminalPane {
     pub fn new(entity: Entity<GhosttyView>) -> Self {
-        Self { entity }
+        Self {
+            entity,
+            presentation_icon: std::rc::Rc::new(std::cell::Cell::new(
+                crate::terminal_identity::TERMINAL,
+            )),
+            #[cfg(target_os = "macos")]
+            pane_surround: Default::default(),
+        }
+    }
+
+    pub(crate) fn presentation_icon(&self) -> &'static str {
+        self.presentation_icon.get()
+    }
+
+    pub(crate) fn set_presentation_icon(&self, icon: &'static str) -> bool {
+        self.presentation_icon.replace(icon) != icon
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn pane_surround(&self, color: Hsla, depth: f32) -> impl IntoElement + use<> {
+        self.pane_surround.render(color, depth)
     }
 
     pub fn title(&self, cx: &App) -> Option<String> {
@@ -184,6 +207,18 @@ impl TerminalPane {
         self.entity.update(cx, |view, cx| {
             view.sync_surface_layout_for_host(bounds, window, cx)
         });
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn set_pane_clip(
+        &self,
+        bounds: Bounds<Pixels>,
+        radius: f32,
+        window: &Window,
+        cx: &mut App,
+    ) {
+        self.entity
+            .update(cx, |view, _| view.set_pane_clip(bounds, radius, window));
     }
 
     #[cfg(not(target_os = "macos"))]

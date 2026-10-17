@@ -40,11 +40,9 @@ pub const RAIL_WIDTH: f32 = 44.0;
 pub const PANEL_WIDTH: f32 = 240.0;
 pub const PANEL_MIN_WIDTH: f32 = 184.0;
 pub const PANEL_MAX_WIDTH: f32 = 360.0;
-/// Width of the floating hover card shown when the cursor is over a
-/// rail icon. Slightly wider than the panel so two-line rows are
-/// comfortable at this magnification.
+/// Compact details next to a rail tile; long paths wrap within this width.
 #[allow(dead_code)]
-const HOVER_CARD_WIDTH: f32 = 240.0;
+const HOVER_CARD_WIDTH: f32 = 232.0;
 /// Single-line tabs keep the expanded navigator as light as the compact rail.
 const ROW_HEIGHT: f32 = 32.0;
 const ROW_SELECTION_INSET: f32 = 3.0;
@@ -57,9 +55,13 @@ const RAIL_SELECTION_SIZE: f32 = 32.0;
 /// Vertical gap between rail icons. Used to compute the icon's
 /// y-center for hover-card anchoring.
 const RAIL_ICON_GAP: f32 = 2.0;
-const RAIL_BUTTON_SIZE: f32 = 28.0;
-const RAIL_DIVIDER_HEIGHT: f32 = 5.0;
-const RAIL_SESSIONS_GAP: f32 = 12.0;
+const RAIL_BUTTON_SIZE: f32 = if cfg!(target_os = "macos") {
+    24.0
+} else {
+    28.0
+};
+const RAIL_DIVIDER_HEIGHT: f32 = if cfg!(target_os = "macos") { 3.0 } else { 5.0 };
+const RAIL_SESSIONS_GAP: f32 = if cfg!(target_os = "macos") { 8.0 } else { 12.0 };
 const RAIL_TOP_CONTROL_COUNT: f32 = 4.0;
 const RAIL_TOP_DIVIDER_COUNT: f32 = 2.0;
 const RAIL_TOP_GAP_COUNT_BEFORE_SESSIONS: f32 = 7.0;
@@ -93,20 +95,45 @@ impl NavigationLayout {
         let new_y = search_y + RAIL_BUTTON_SIZE + RAIL_DIVIDER_HEIGHT + 2.0 * RAIL_ICON_GAP;
         let controls = [
             (8.0, 0.0),
-            (42.0, files_y),
-            (76.0, search_y),
-            (panel_width - 36.0, new_y),
+            (40.0, files_y),
+            (72.0, search_y),
+            (
+                if cfg!(target_os = "macos") {
+                    104.0
+                } else {
+                    panel_width - RAIL_BUTTON_SIZE - 8.0
+                },
+                new_y,
+            ),
         ]
-        .map(|(expanded_x, compact_y)| (mix(8.0, expanded_x), leading + mix(compact_y, 0.0)));
+        .map(|(expanded_x, compact_y)| {
+            let compact_x = if cfg!(target_os = "macos") {
+                (RAIL_WIDTH - RAIL_BUTTON_SIZE) * 0.5
+            } else {
+                8.0
+            };
+            (mix(compact_x, expanded_x), leading + mix(compact_y, 0.0))
+        });
         Self {
             width: mix(RAIL_WIDTH, panel_width),
             row_height: mix(RAIL_ICON_SIZE, row_height),
             row_inset: mix(2.0, 8.0),
             selection_inset: mix(4.0, ROW_SELECTION_INSET),
-            selection_radius: mix(10.0, (row_height - 2.0 * ROW_SELECTION_INSET) * 0.5),
+            selection_radius: mix(
+                10.0,
+                if cfg!(target_os = "macos") {
+                    7.0
+                } else {
+                    (row_height - 2.0 * ROW_SELECTION_INSET) * 0.5
+                },
+            ),
             icon_size: mix(18.0, icon_size),
             icon_center_x: mix(RAIL_ICON_SIZE * 0.5, row_height * 0.5),
-            list_top: leading + mix(RAIL_TOP_CONTROLS_HEIGHT, RAIL_BUTTON_SIZE + 12.0),
+            list_top: leading
+                + mix(
+                    RAIL_TOP_CONTROLS_HEIGHT,
+                    RAIL_BUTTON_SIZE + RAIL_SESSIONS_GAP,
+                ),
             label_opacity: ((t - 0.15) / 0.7).clamp(0.0, 1.0),
             compact: t < 0.5,
             controls,
@@ -478,6 +505,27 @@ impl SessionSidebar {
 
     pub fn is_pinned(&self) -> bool {
         matches!(self.mode, PanelMode::Pinned)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn caption_dock_progress(&self, visibility: f32, minimum_width: f32) -> f32 {
+        // Files/Search render a rail plus a tool column whose combined width
+        // is panel_width, even though the tab rail itself is compact.
+        let target_width = if self.tools_panel_open {
+            self.panel_width
+        } else {
+            self.effective_panel_width()
+        };
+        if (!self.tools_panel_open && self.rail_only_override) || target_width <= minimum_width {
+            return 0.0;
+        }
+        let rendered_width = if self.tools_panel_open {
+            self.panel_width
+        } else {
+            self.rendered_width()
+        };
+        ((rendered_width * visibility - minimum_width) / (target_width - minimum_width))
+            .clamp(0.0, 1.0)
     }
 
     pub fn panel_width(&self) -> f32 {
@@ -1000,7 +1048,7 @@ impl SessionSidebar {
                     }
                 }),
             ))
-            .child(div().h(px(1.0)).w(px(20.0)).my(px(2.0)))
+            .child(div().h(px(RAIL_DIVIDER_HEIGHT)).w(px(20.0)))
             .child(rail_icon_button(
                 "tab-sidebar-rail-files",
                 "phosphor/folders.svg",
@@ -1023,7 +1071,7 @@ impl SessionSidebar {
                     })
                 }),
             ))
-            .child(div().h(px(1.0)).w(px(20.0)).my(px(2.0)))
+            .child(div().h(px(RAIL_DIVIDER_HEIGHT)).w(px(20.0)))
             .child(rail_icon_button(
                 "tab-sidebar-rail-new",
                 "phosphor/plus.svg",
@@ -1213,12 +1261,8 @@ impl SessionSidebar {
     /// Composed in workspace coordinates so it renders OVER the
     /// translucent terminal pane (instead of behind it).
     ///
-    /// The card vertically tracks the cursor's current y so the user
-    /// always sees the card beside their finger. Anchoring it to the
-    /// icon's geometric center sounded cleaner but actually requires
-    /// computing the rail layout from this side, which is brittle —
-    /// the cursor IS the icon, and "follow the cursor" is the
-    /// established Apple tooltip pattern (Finder, Mail, Safari).
+    /// Anchor to the measured tile, not cursor movement within it. This keeps
+    /// the details stable while the user reads them or moves to another tab.
     ///
     /// Composed by the workspace as a root overlay (window coordinates)
     /// so it paints above the terminal and is not clipped by the
@@ -1237,33 +1281,61 @@ impl SessionSidebar {
         }
         let session = self.sessions.get(i)?;
         let theme = cx.theme();
-        let bg = elevated_surface(theme, self.ui_opacity);
+        let bg = theme.popover.opacity(1.0);
         let cursor = window.mouse_position();
+        let anchor_y = self
+            .tab_bounds
+            .borrow()
+            .get(i)
+            .map(|bounds| bounds.top())
+            .unwrap_or(cursor.y - ui_px(theme, 21.0));
         let min_top = self.leading_top_pad + RAIL_TOP_CONTROLS_HEIGHT + 8.0;
         let max_height = (window.viewport_size().height.as_f32() - min_top - 8.0).clamp(1.0, 240.0);
 
         let name_color = theme.foreground;
         let sub_color = theme.muted_foreground;
         let meta_color = theme.muted_foreground;
-        let mono_font = theme.mono_font_family.clone();
         let sys_font = theme.font_family.clone();
 
         let mut card_inner = div()
             .flex()
             .flex_col()
             .px(px(12.0))
-            .py(px(12.0))
+            .py(px(10.0))
             .font_family(sys_font)
             .child(
                 div()
-                    .debug_selector(|| "tab-hover-name".into())
-                    .flex_shrink_0()
-                    .text_size(ui_px(theme, 13.0))
-                    .line_height(ui_px(theme, 18.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(name_color)
-                    .truncate()
-                    .child(session.name.clone()),
+                    .debug_selector(|| "tab-hover-heading".into())
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(crate::assets::tab_identity_icon(
+                        sidebar_tab_icon(session.icon),
+                        ui_px(theme, 18.0),
+                        theme.foreground,
+                    ))
+                    .child(
+                        div()
+                            .debug_selector(|| "tab-hover-name".into())
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(ui_px(theme, 13.0))
+                            .line_height(ui_px(theme, 18.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(name_color)
+                            .truncate()
+                            .child(session.name.clone()),
+                    )
+                    .when(session.pane_count > 1, |row| {
+                        row.child(
+                            div()
+                                .debug_selector(|| "tab-hover-pane-count".into())
+                                .flex_shrink_0()
+                                .text_size(ui_px(theme, 11.0))
+                                .text_color(meta_color)
+                                .child(format!("{} panes", session.pane_count)),
+                        )
+                    }),
             );
 
         if let Some(sub) = session.subtitle.as_ref() {
@@ -1271,11 +1343,11 @@ impl SessionSidebar {
                 div()
                     .debug_selector(|| "tab-hover-path".into())
                     .flex_shrink_0()
-                    .mt(px(4.0))
+                    .mt(px(6.0))
                     .text_size(ui_px(theme, 11.0))
                     .line_height(ui_px(theme, 16.0))
                     .text_color(sub_color)
-                    .font_family(mono_font)
+                    .font_family(theme.font_family.clone())
                     .w_full()
                     .child(sub.clone()),
             );
@@ -1293,14 +1365,26 @@ impl SessionSidebar {
             })
             .collect();
         if !terminal_titles.is_empty() {
-            let mut titles = div().flex().flex_col().flex_shrink_0().mt(px(8.0));
+            let mut titles = div()
+                .flex()
+                .flex_col()
+                .flex_shrink_0()
+                .mt(px(8.0))
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .h(px(0.5))
+                        .w_full()
+                        .mb(px(4.0))
+                        .bg(theme.foreground.opacity(0.08)),
+                );
             for title in terminal_titles {
                 titles = titles.child(
                     div()
                         .flex_shrink_0()
                         .text_size(ui_px(theme, 11.0))
                         .line_height(ui_px(theme, 16.0))
-                        .font_family(theme.mono_font_family.clone())
+                        .font_family(theme.font_family.clone())
                         .text_color(theme.foreground)
                         .truncate()
                         .child(title.clone()),
@@ -1334,17 +1418,14 @@ impl SessionSidebar {
             .line_height(ui_px(theme, 14.0))
             .text_color(meta_color);
 
-        let pane_label = match session.pane_count {
-            0 | 1 => "1 pane".to_string(),
-            n => format!("{n} panes"),
-        };
-        meta = meta.child(div().child(pane_label));
         if session.is_ssh {
-            meta = meta.child(div().child("·").text_color(meta_color));
             meta = meta.child(div().child("SSH"));
         }
         if session.needs_attention {
-            meta = meta.child(div().child("·").text_color(meta_color)).child(
+            if session.is_ssh {
+                meta = meta.child(div().child("·").text_color(meta_color));
+            }
+            meta = meta.child(
                 div()
                     .flex()
                     .items_center()
@@ -1353,7 +1434,9 @@ impl SessionSidebar {
                     .child(div().child("unread")),
             );
         }
-        card_inner = card_inner.child(meta);
+        if session.is_ssh || session.needs_attention {
+            card_inner = card_inner.child(meta);
+        }
 
         let card = div()
             .id("tab-sidebar-hover-card")
@@ -1361,7 +1444,8 @@ impl SessionSidebar {
             .w(px(HOVER_CARD_WIDTH.min(
                 (window.viewport_size().width.as_f32() - RAIL_WIDTH - 14.0).max(1.0),
             )))
-            .rounded(px(8.0))
+            .relative()
+            .rounded(px(10.0))
             .bg(bg)
             .occlude()
             .child(
@@ -1369,16 +1453,32 @@ impl SessionSidebar {
                     .id("tab-title-details")
                     .max_h(px(max_height))
                     .overflow_y_scroll(),
-            );
+            )
+            .map(|card| {
+                #[cfg(target_os = "macos")]
+                {
+                    card.child(
+                        crate::workspace::frame::surface_edge(
+                            10.0,
+                            theme
+                                .foreground
+                                .opacity(if theme.is_dark() { 0.12 } else { 0.075 }),
+                            true,
+                        )
+                        .inset_0(),
+                    )
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    card
+                }
+            });
 
         // Let GPUI fit the measured card, including wrapped paths, instead
         // of estimating its height from character counts or line counts.
         Some(
             anchored()
-                .position(point(
-                    px(RAIL_WIDTH + 6.0),
-                    (cursor.y - ui_px(theme, 21.0)).max(px(min_top)),
-                ))
+                .position(point(px(RAIL_WIDTH + 6.0), anchor_y.max(px(min_top))))
                 .snap_to_window_with_margin(px(8.0))
                 .child(card)
                 .into_any_element(),
@@ -2082,14 +2182,15 @@ fn surface_tone(theme: &gpui_component::Theme, intensity: f32) -> Hsla {
     theme.background.blend(over)
 }
 
-fn elevated_surface(theme: &gpui_component::Theme, opacity: f32) -> Hsla {
-    theme.background.opacity((opacity + 0.06).min(0.98))
-}
-
 fn sidebar_selection_fill(theme: &gpui_component::Theme) -> Hsla {
-    theme
-        .foreground
-        .opacity(if theme.is_dark() { 0.12 } else { 0.065 })
+    let opacity = if cfg!(target_os = "macos") {
+        if theme.is_dark() { 0.10 } else { 0.045 }
+    } else if theme.is_dark() {
+        0.12
+    } else {
+        0.065
+    };
+    theme.foreground.opacity(opacity)
 }
 
 fn sidebar_tab_icon(icon: &'static str) -> &'static str {
@@ -2224,7 +2325,7 @@ where
     div()
         .id(id)
         .debug_selector(move || id.into())
-        .size(px(28.0))
+        .size(px(RAIL_BUTTON_SIZE))
         .flex_shrink_0()
         .flex()
         .items_center()
@@ -2571,6 +2672,92 @@ fn normalize_sidebar_rename_label(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn caption_reaches_its_endpoint_with_navigation_and_never_overhangs_a_rail() {
+        let mut sidebar = super::SessionSidebar::default_state();
+        sidebar.mode = super::PanelMode::Pinned;
+        for width in [184.0, 230.0, 320.0] {
+            sidebar.panel_width = width;
+            for progress in [0.0, 0.5, 0.9, 1.0, 0.3, 1.0] {
+                sidebar.width_motion = crate::motion::SidebarMotion::new(progress);
+                for visibility in [0.0, 0.5, 0.9, 1.0] {
+                    let dock = sidebar.caption_dock_progress(visibility, 168.0);
+                    let visible_width = sidebar.rendered_width() * visibility;
+                    assert!((0.0..=1.0).contains(&dock));
+                    if dock > 0.0 {
+                        assert!(visible_width > 168.0);
+                    }
+                    if progress == 1.0 && visibility == 1.0 {
+                        assert_eq!(dock, 1.0, "caption waited for an independent animation");
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn caption_uses_the_effective_panel_not_the_saved_expanded_preference(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext;
+        let sidebar = cx.new(super::SessionSidebar::new);
+        sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_pinned(true, cx);
+            sidebar.width_motion = crate::motion::SidebarMotion::new(1.0);
+            assert_eq!(sidebar.caption_dock_progress(1.0, 168.0), 1.0);
+            for visibility in [0.0, 0.5, 0.7] {
+                assert_eq!(sidebar.caption_dock_progress(visibility, 168.0), 0.0);
+            }
+            assert!(sidebar.caption_dock_progress(0.9, 168.0) > 0.0);
+            sidebar.show_rail_only_preserving_pinned(cx);
+            assert!(sidebar.is_pinned());
+            assert_eq!(sidebar.caption_dock_progress(1.0, 168.0), 0.0);
+            sidebar.clear_rail_only_override(cx);
+            assert_eq!(sidebar.caption_dock_progress(1.0, 168.0), 1.0);
+            sidebar.set_tools_panel_open(true, crate::activity_bar::ActivitySlot::Files);
+            assert_eq!(sidebar.caption_dock_progress(1.0, 168.0), 1.0);
+            sidebar.set_tools_panel_open(false, crate::activity_bar::ActivitySlot::Files);
+            sidebar.set_pinned(false, cx);
+            assert!(
+                sidebar.caption_dock_progress(1.0, 168.0) > 0.99,
+                "the outgoing expanded layout still has room for the caption"
+            );
+            sidebar.width_motion = crate::motion::SidebarMotion::new(0.0);
+            assert_eq!(sidebar.caption_dock_progress(1.0, 168.0), 0.0);
+            sidebar.set_pinned(true, cx);
+            sidebar.width_motion = crate::motion::SidebarMotion::new(0.0);
+            assert_eq!(sidebar.caption_dock_progress(1.0, 168.0), 0.0);
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn tool_columns_dock_the_caption_by_combined_width_not_rail_width(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext;
+        let sidebar = cx.new(super::SessionSidebar::new);
+        sidebar.update(cx, |sidebar, _| {
+            for slot in [
+                crate::activity_bar::ActivitySlot::Files,
+                crate::activity_bar::ActivitySlot::Search,
+            ] {
+                sidebar.set_tools_panel_open(true, slot);
+                assert_eq!(sidebar.rendered_width(), super::RAIL_WIDTH);
+                assert_eq!(sidebar.caption_dock_progress(1.0, 168.0), 1.0);
+                assert_eq!(sidebar.caption_dock_progress(0.5, 168.0), 0.0);
+            }
+            sidebar.set_tools_panel_open(false, crate::activity_bar::ActivitySlot::Search);
+            assert_eq!(
+                sidebar.caption_dock_progress(1.0, 168.0),
+                0.0,
+                "a rail alone still needs the global caption"
+            );
+        });
+    }
+
     #[gpui::test]
     fn collapsing_keeps_outgoing_panel_extent_until_motion_settles(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext;
@@ -2614,6 +2801,36 @@ mod tests {
     }
 
     #[gpui::test]
+    fn hover_details_anchor_to_the_tile_and_omit_redundant_single_pane_metadata(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            use gpui::AppContext;
+            HoverCardTestView(cx.new(|cx| {
+                let mut sidebar = SessionSidebar::new(cx);
+                sidebar.hovered_rail = Some(0);
+                sidebar.sessions = vec![session(None, None)];
+                sidebar.tab_bounds.borrow_mut().push(Bounds::new(
+                    gpui::point(px(8.0), px(300.0)),
+                    gpui::size(px(40.0), px(40.0)),
+                ));
+                sidebar
+            }))
+        });
+        let before = cx.debug_bounds("tab-hover-card").unwrap();
+        assert_eq!(before.top(), px(300.0));
+        assert!(cx.debug_bounds("tab-hover-meta").is_none());
+        cx.simulate_mouse_move(
+            gpui::point(px(22.0), px(332.0)),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        view.update(cx, |_, cx| cx.notify());
+        assert_eq!(cx.debug_bounds("tab-hover-card").unwrap(), before);
+    }
+
+    #[gpui::test]
     fn hover_card_keeps_title_path_and_status_inside_balanced_padding(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -2643,14 +2860,17 @@ mod tests {
             }))
         });
         let card = cx.debug_bounds("tab-hover-card").expect("hover card");
+        let heading = cx.debug_bounds("tab-hover-heading").expect("heading");
         let name = cx.debug_bounds("tab-hover-name").expect("name");
+        let count = cx.debug_bounds("tab-hover-pane-count").expect("pane count");
         let path = cx.debug_bounds("tab-hover-path").expect("path");
         let status = cx.debug_bounds("tab-hover-status").expect("status");
         let meta = cx.debug_bounds("tab-hover-meta").expect("metadata");
-        assert_eq!(name.left() - card.left(), px(12.0));
-        assert_eq!(card.right() - name.right(), px(12.0));
-        assert_eq!(name.top() - card.top(), px(12.0));
-        assert_eq!(card.bottom() - meta.bottom(), px(12.0));
+        assert_eq!(heading.left() - card.left(), px(12.0));
+        assert_eq!(card.right() - heading.right(), px(12.0));
+        assert_eq!(heading.top() - card.top(), px(10.0));
+        assert_eq!(card.bottom() - meta.bottom(), px(10.0));
+        assert!(name.right() <= count.left());
         assert!(name.bottom() <= path.top());
         assert!(path.bottom() <= status.top());
         assert!(status.bottom() <= meta.top());
@@ -2689,9 +2909,8 @@ mod tests {
                 let status = cx.debug_bounds("tab-hover-status").expect("status label");
                 assert!((status.size.height.as_f32() - expected_height).abs() < 0.5);
                 let path = cx.debug_bounds("tab-hover-path").expect("path");
-                let meta = cx.debug_bounds("tab-hover-meta").expect("metadata");
                 assert!(path.bottom() <= status.top());
-                assert!(status.bottom() <= meta.top());
+                assert!(cx.debug_bounds("tab-hover-meta").is_none());
                 heights.push(status.size.height.as_f32());
             }
             assert!(heights[0] < heights[1] && heights[1] < heights[2]);
@@ -3044,6 +3263,20 @@ mod tests {
             });
             let row = cx.debug_bounds("sidebar-session-row").unwrap();
             let icon = cx.debug_bounds("tab-status-brand").unwrap();
+            #[cfg(target_os = "macos")]
+            if t == 0.0 {
+                for selector in [
+                    "tab-sidebar-rail-expand",
+                    "tab-sidebar-rail-files",
+                    "tab-sidebar-rail-search",
+                    "tab-sidebar-rail-new",
+                ] {
+                    assert_eq!(
+                        cx.debug_bounds(selector).unwrap().center().x,
+                        icon.center().x
+                    );
+                }
+            }
             let width = view.read_with(cx, |sidebar, _| sidebar.rendered_width());
             assert!(row.left() >= px(0.0) && row.right() <= px(width));
             assert!((icon.center().y - row.center().y).abs() < px(0.5));

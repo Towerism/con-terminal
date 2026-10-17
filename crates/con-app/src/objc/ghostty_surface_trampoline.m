@@ -14,6 +14,255 @@ extern void ghostty_surface_set_size(void *surface, uint32_t width, uint32_t hei
 static char kConGhosttySurfaceBackingObserverKey;
 static const int64_t kConDisplayWakeQuietPeriodMilliseconds = 250;
 
+static char kConTerminalCanvasKey;
+static char kConTerminalCanvasMaskKey;
+
+@interface ConTerminalCanvasClip : NSObject
+@property(nonatomic) NSRect rect;
+@property(nonatomic) CGFloat radius;
+@property(nonatomic) uint64_t generation;
+@property(nonatomic) CGFloat scale;
+@end
+@implementation ConTerminalCanvasClip
+@end
+
+@interface ConTerminalCanvasMask : NSObject
+@property(nonatomic, strong) CAShapeLayer *layer;
+@property(nonatomic, strong) CAShapeLayer *paneLayer;
+@property(nonatomic, weak) CALayer *targetLayer;
+@property(nonatomic) NSRect rect;
+@property(nonatomic) NSRect bounds;
+@property(nonatomic) NSRect paneRect;
+@property(nonatomic) CGFloat paneRadius;
+@property(nonatomic) CGFloat radius;
+@property(nonatomic) CGFloat scale;
+@end
+@implementation ConTerminalCanvasMask
+@end
+
+// Material only: this never receives input or becomes a first responder.
+@interface ConTerminalCanvasSafeArea : NSView
+@property(nonatomic, strong) NSColor *materialColor;
+@property(nonatomic) uint64_t clipGeneration;
+@end
+@implementation ConTerminalCanvasSafeArea
+- (NSView *)hitTest:(NSPoint)point { return nil; }
+- (BOOL)acceptsFirstResponder { return NO; }
+@end
+static char kConTerminalCanvasSafeAreaKey;
+static char kConTerminalPaneClipKey;
+
+// Pane bounds use the same parent coordinate system as the workspace clip.
+// Keeping them on each host leaves the window-wide transition underlay alone.
+bool con_terminal_pane_set_clip(void *host_ptr, double x, double y,
+                                double width, double height, double radius) {
+    NSView *host = (__bridge NSView *)host_ptr;
+    if (host == nil || host.superview == nil || !isfinite(x) || !isfinite(y) ||
+        !isfinite(width) || !isfinite(height) || !isfinite(radius) ||
+        width < 0 || height < 0 || radius < 0) return false;
+    NSRect rect = NSMakeRect(x, host.superview.bounds.size.height - y - height, width, height);
+    radius = fmin(radius, fmin(width, height) * 0.5);
+    ConTerminalCanvasClip *clip = objc_getAssociatedObject(host, &kConTerminalPaneClipKey);
+    if (clip != nil && NSEqualRects(clip.rect, rect) && clip.radius == radius) return false;
+    if (clip == nil) {
+        clip = [ConTerminalCanvasClip new];
+        objc_setAssociatedObject(host, &kConTerminalPaneClipKey, clip, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    clip.rect = rect;
+    clip.radius = radius;
+    return true;
+}
+
+static NSView *con_terminal_parent(NSView *gpui) {
+    return gpui.superview ?: gpui;
+}
+
+bool con_terminal_canvas_set_clip(void *gpui_ptr, double x, double y,
+                                  double width, double height, double radius) {
+    NSView *parent = con_terminal_parent((__bridge NSView *)gpui_ptr);
+    if (parent == nil) return false;
+    if (!isfinite(x) || !isfinite(y) || !isfinite(width) || !isfinite(height) ||
+        !isfinite(radius) || width < 0 || height < 0) return false;
+    radius = fmax(0.0, fmin(radius, fmin(width, height) * 0.5));
+    NSView *gpui = (__bridge NSView *)gpui_ptr;
+    CGFloat scale = gpui.window != nil ? gpui.window.backingScaleFactor : 1.0;
+    if (!isfinite(scale) || scale <= 0.0) scale = 1.0;
+    NSRect rect = NSMakeRect(x, parent.bounds.size.height - y - height, width, height);
+    ConTerminalCanvasClip *clip = objc_getAssociatedObject(parent, &kConTerminalCanvasKey);
+    if (clip == nil) {
+        clip = [ConTerminalCanvasClip new];
+        objc_setAssociatedObject(parent, &kConTerminalCanvasKey, clip, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } else if (NSEqualRects(clip.rect, rect) && clip.radius == radius && clip.scale == scale) {
+        return false;
+    }
+    clip.rect = rect;
+    clip.radius = radius;
+    clip.scale = scale;
+    clip.generation += 1;
+    return true;
+}
+
+double con_terminal_canvas_radius(void *gpui_ptr) {
+    NSView *parent = con_terminal_parent((__bridge NSView *)gpui_ptr);
+    ConTerminalCanvasClip *clip = objc_getAssociatedObject(parent, &kConTerminalCanvasKey);
+    return clip.radius;
+}
+
+uint64_t con_terminal_canvas_generation(void *host_ptr) {
+    NSView *host = (__bridge NSView *)host_ptr;
+    ConTerminalCanvasClip *clip = objc_getAssociatedObject(host.superview, &kConTerminalCanvasKey);
+    return clip.generation;
+}
+
+void con_terminal_canvas_apply_clip(void *host_ptr) {
+    NSView *host = (__bridge NSView *)host_ptr;
+    ConTerminalCanvasClip *clip = objc_getAssociatedObject(host.superview, &kConTerminalCanvasKey);
+    if (clip == nil) return;
+    ConTerminalCanvasClip *pane = objc_getAssociatedObject(host, &kConTerminalPaneClipKey);
+    // NSScrollView can remain view-backed even when its terminal descendant
+    // has a Metal layer. A layer mask is otherwise silently skipped entirely.
+    if (host.layer == nil && (clip.radius > 0 || pane.radius > 0)) {
+        host.wantsLayer = YES;
+    }
+    if (host.layer == nil) return;
+    NSRect rect = [host convertRect:clip.rect fromView:host.superview];
+    CGFloat paneRadius = pane.radius;
+    NSRect paneRect = paneRadius > 0 ? [host convertRect:pane.rect fromView:host.superview] : NSZeroRect;
+    CGFloat scale = host.window != nil ? host.window.backingScaleFactor : host.layer.contentsScale;
+    if (!isfinite(scale) || scale <= 0.0) scale = 1.0;
+    ConTerminalCanvasMask *mask = objc_getAssociatedObject(host, &kConTerminalCanvasMaskKey);
+    if (mask == nil) {
+        mask = [ConTerminalCanvasMask new];
+        mask.layer = [CAShapeLayer layer];
+        mask.layer.fillColor = NSColor.blackColor.CGColor;
+        mask.paneLayer = [CAShapeLayer layer];
+        mask.paneLayer.fillColor = NSColor.blackColor.CGColor;
+        objc_setAssociatedObject(host, &kConTerminalCanvasMaskKey, mask, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } else if (NSEqualRects(mask.rect, rect) && NSEqualRects(mask.bounds, host.bounds) &&
+               mask.radius == clip.radius && mask.scale == scale &&
+               mask.paneRadius == paneRadius && NSEqualRects(mask.paneRect, paneRect)) {
+        BOOL clean = clip.radius <= 0.0 && paneRadius <= 0.0 && NSContainsRect(rect, host.bounds);
+        if (clean ? host.layer.mask != nil : (host.layer.mask != mask.layer ||
+                mask.targetLayer != host.layer || mask.layer.mask != (paneRadius > 0 ? mask.paneLayer : nil))) {
+            // AppKit may replace a backing layer without changing view bounds.
+            // Rebind the cached paths instead of treating geometry as authority.
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            if (mask.targetLayer != nil && mask.targetLayer != host.layer && mask.targetLayer.mask == mask.layer) {
+                mask.targetLayer.mask = nil;
+            }
+            mask.targetLayer = host.layer;
+            mask.layer.mask = paneRadius > 0 ? mask.paneLayer : nil;
+            host.layer.mask = clean ? nil : mask.layer;
+            [CATransaction commit];
+        }
+        return;
+    }
+    mask.rect = rect;
+    mask.bounds = host.bounds;
+    mask.radius = clip.radius;
+    mask.scale = scale;
+    mask.paneRadius = paneRadius;
+    mask.paneRect = paneRect;
+    if (clip.radius <= 0.0 && paneRadius <= 0.0 && NSContainsRect(rect, host.bounds)) {
+        // Clean mode needs no extra offscreen mask for an already-contained host.
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        host.layer.mask = nil;
+        [CATransaction commit];
+        return;
+    }
+    CGPathRef path = CGPathCreateWithRoundedRect(NSRectToCGRect(rect), clip.radius, clip.radius, NULL);
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    if (mask.targetLayer != nil && mask.targetLayer != host.layer && mask.targetLayer.mask == mask.layer) {
+        mask.targetLayer.mask = nil;
+    }
+    mask.targetLayer = host.layer;
+    mask.layer.frame = host.bounds;
+    mask.layer.contentsScale = scale;
+    mask.layer.path = path;
+    if (paneRadius > 0) {
+        CGPathRef panePath = CGPathCreateWithRoundedRect(NSRectToCGRect(paneRect), paneRadius, paneRadius, NULL);
+        mask.paneLayer.frame = host.bounds;
+        mask.paneLayer.contentsScale = scale;
+        mask.paneLayer.path = panePath;
+        mask.layer.mask = mask.paneLayer;
+        CGPathRelease(panePath);
+    } else {
+        mask.layer.mask = nil;
+    }
+    host.layer.mask = mask.layer;
+    [CATransaction commit];
+    CGPathRelease(path);
+}
+
+bool con_terminal_canvas_clip_is_attached(void *host_ptr) {
+    NSView *host = (__bridge NSView *)host_ptr;
+    ConTerminalCanvasClip *clip = objc_getAssociatedObject(host.superview, &kConTerminalCanvasKey);
+    ConTerminalCanvasClip *pane = objc_getAssociatedObject(host, &kConTerminalPaneClipKey);
+    if (clip == nil || host.layer == nil) return false;
+    NSRect rect = [host convertRect:clip.rect fromView:host.superview];
+    if (clip.radius <= 0.0 && pane.radius <= 0.0 && NSContainsRect(rect, host.bounds)) {
+        return host.layer.mask == nil;
+    }
+    ConTerminalCanvasMask *mask = objc_getAssociatedObject(host, &kConTerminalCanvasMaskKey);
+    return mask != nil && mask.targetLayer == host.layer && host.layer.mask == mask.layer &&
+        mask.layer.mask == (pane.radius > 0 ? mask.paneLayer : nil);
+}
+
+bool con_terminal_canvas_set_safe_area(void *gpui_ptr, double height,
+                                      double red, double green, double blue, double alpha) {
+    NSView *gpui = (__bridge NSView *)gpui_ptr;
+    NSView *parent = con_terminal_parent(gpui);
+    ConTerminalCanvasClip *clip = objc_getAssociatedObject(parent, &kConTerminalCanvasKey);
+    if (parent == nil || clip == nil || !isfinite(height) || !isfinite(red) ||
+        !isfinite(green) || !isfinite(blue) || !isfinite(alpha)) return false;
+    height = fmax(0, fmin(height, clip.rect.size.height));
+    ConTerminalCanvasSafeArea *view = objc_getAssociatedObject(parent, &kConTerminalCanvasSafeAreaKey);
+    if (height == 0) {
+        if (view == nil || view.hidden) return false;
+        view.hidden = YES;
+        return true;
+    }
+    NSRect rect = NSMakeRect(clip.rect.origin.x, clip.rect.origin.y,
+                            clip.rect.size.width, height);
+    NSColor *color = [NSColor colorWithSRGBRed:red green:green blue:blue alpha:alpha];
+    if (view == nil) {
+        view = [[ConTerminalCanvasSafeArea alloc] initWithFrame:rect];
+        view.wantsLayer = YES;
+        [parent addSubview:view positioned:NSWindowBelow relativeTo:gpui];
+        objc_setAssociatedObject(parent, &kConTerminalCanvasSafeAreaKey, view,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } else if (!view.hidden && NSEqualRects(view.frame, rect) &&
+               [view.materialColor isEqual:color] && view.clipGeneration == clip.generation) {
+        return false;
+    }
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    view.frame = rect;
+    view.layer.backgroundColor = color.CGColor;
+    view.hidden = NO;
+    con_terminal_canvas_apply_clip((__bridge void *)view);
+    [CATransaction commit];
+    view.materialColor = color;
+    view.clipGeneration = clip.generation;
+    return true;
+}
+
+uint8_t con_terminal_canvas_header_corners(void *gpui_ptr, double x, double y,
+                                          double width) {
+    NSView *parent = con_terminal_parent((__bridge NSView *)gpui_ptr);
+    ConTerminalCanvasClip *clip = objc_getAssociatedObject(parent, &kConTerminalCanvasKey);
+    if (clip == nil || clip.radius <= 0.0) return 0;
+    CGFloat top = parent.bounds.size.height - y;
+    if (fabs(top - NSMaxY(clip.rect)) > 0.25) return 0;
+    uint8_t corners = 0;
+    if (fabs(x - NSMinX(clip.rect)) < 0.25) corners |= 1;
+    if (fabs(x + width - NSMaxX(clip.rect)) < 0.25) corners |= 2;
+    return corners;
+}
+
 // Only read the native event while its terminal window is handling keyDown.
 // Remote text injection can carry Unicode unrelated to the virtual keycode.
 const char *con_ghostty_surface_current_key_text(void *view_ptr, size_t *text_length) {

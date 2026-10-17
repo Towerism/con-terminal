@@ -115,7 +115,39 @@ pub(crate) fn tab_identity_icon(
     color: gpui::Hsla,
 ) -> gpui::AnyElement {
     use gpui::{IntoElement, Styled, StyledImage};
-    if path.ends_with(".png") {
+    if let Some(glyph) = crate::terminal_identity::glyph(path) {
+        gpui::canvas(
+            move |bounds, window, _| {
+                let (font_size, ink) = crate::terminal_identity::glyph_geometry(glyph, size)?;
+                let text = SharedString::from(glyph.to_string());
+                let line = window.text_system().shape_line(
+                    text.clone(),
+                    font_size,
+                    &[gpui::TextRun {
+                        len: text.len(),
+                        font: gpui::font(crate::file_icons::FILE_ICON_FONT_FAMILY),
+                        color: crate::terminal_identity::color(path),
+                        ..Default::default()
+                    }],
+                    None,
+                );
+                let baseline = (size - line.ascent - line.descent) * 0.5 + line.ascent;
+                let origin = gpui::point(
+                    bounds.center().x - ink.center().x,
+                    bounds.center().y + ink.center().y - baseline,
+                );
+                Some((line, origin))
+            },
+            move |_, shaped, window, cx| {
+                if let Some((line, origin)) = shaped {
+                    let _ = line.paint(origin, size, gpui::TextAlign::Left, None, window, cx);
+                }
+            },
+        )
+        .size(size)
+        .flex_shrink_0()
+        .into_any_element()
+    } else if path.ends_with(".png") {
         gpui::img(png_preview(path, size.as_f32()))
             .size(size)
             .object_fit(gpui::ObjectFit::Contain)
