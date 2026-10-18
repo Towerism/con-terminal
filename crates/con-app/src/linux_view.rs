@@ -3717,7 +3717,7 @@ mod tests {
             }
             view.refresh_snapshot();
             view.scale_factor = scale;
-            let width = (24.0 + f32::from(columns) * 9.0).max(800.0);
+            let width = (2.0 * PAD_X + f32::from(columns) * CELL_W).max(800.0);
             view.pane_bounds = Some(Bounds::new(
                 point(px(31.0), px(47.0)),
                 size(px(width), px(520.0)),
