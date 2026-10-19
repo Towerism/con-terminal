@@ -483,6 +483,9 @@ pub struct GhosttyView {
     selection_autoscroll_active: bool,
     /// Set while the left button holds the scrollbar thumb.
     scrollbar_drag: Option<ThumbDrag>,
+    /// Scrollbar state read with `snapshot`, so the thumb matches the rows
+    /// being painted.
+    scrollbar: Option<con_ghostty::GhosttyScrollbar>,
     keys_awaiting_release: HashMap<String, crate::terminal_keys::TrackedVtKey>,
     pending_unsafe_paste: Option<(String, VtPasteSource)>,
 }
@@ -593,6 +596,7 @@ impl GhosttyView {
             selection_autoscroll_epoch: 0,
             selection_autoscroll_active: false,
             scrollbar_drag: None,
+            scrollbar: None,
             keys_awaiting_release: HashMap::new(),
             pending_unsafe_paste: None,
         }
@@ -1032,6 +1036,10 @@ impl GhosttyView {
             self.seen_any_output = true;
         }
         self.snapshot = Some(snapshot);
+        self.scrollbar = self
+            .terminal
+            .as_ref()
+            .and_then(|terminal| terminal.scrollbar());
         true
     }
 
@@ -1160,6 +1168,9 @@ impl GhosttyView {
     /// Page Con's scrollback for Shift+PgUp/PgDn on the primary screen.
     /// Returns whether the key was used; unused keys go to the application.
     fn try_page_scrollback(&mut self, keystroke: &gpui::Keystroke) -> bool {
+        if !matches!(keystroke.key.as_str(), "pageup" | "pagedown") || !keystroke.modifiers.shift {
+            return false;
+        }
         let Some(terminal) = self.terminal().filter(|t| t.is_attached()).cloned() else {
             return false;
         };
@@ -1176,7 +1187,7 @@ impl GhosttyView {
     /// scrollback to show.
     fn scrollbar_thumb(&self) -> Option<(con_ghostty::GhosttyScrollbar, ThumbLayout)> {
         let bounds = self.pane_bounds?;
-        let scrollbar = self.terminal()?.scrollbar()?;
+        let scrollbar = self.scrollbar?;
         Some((
             scrollbar,
             thumb_layout(f32::from(bounds.size.height), scrollbar)?,
@@ -1227,6 +1238,43 @@ impl GhosttyView {
         let theme = cx.theme();
         let thumb_color = theme.foreground.opacity(0.28);
         let thumb_hover_color = theme.foreground.opacity(0.42);
+        // While the thumb is held, follow the pointer and the release across
+        // the whole window: the pane's own listeners stop at its edge.
+        let window_drag_listener = self.scrollbar_drag.is_some().then(|| {
+            let view = cx.entity().downgrade();
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    let move_view = view.clone();
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                        if phase != DispatchPhase::Bubble {
+                            return;
+                        }
+                        let _ = move_view.update(cx, |this, cx| {
+                            if event.pressed_button == Some(MouseButton::Left) {
+                                this.drag_scrollbar(event.position);
+                            } else {
+                                this.end_scrollbar_drag();
+                            }
+                            cx.notify();
+                        });
+                    });
+                    let up_view = view.clone();
+                    window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                        if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
+                            return;
+                        }
+                        let _ = up_view.update(cx, |this, cx| {
+                            if this.end_scrollbar_drag() {
+                                cx.notify();
+                            }
+                        });
+                    });
+                },
+            )
+            .absolute()
+            .size_0()
+        });
 
         Some(
             div()
@@ -1265,6 +1313,7 @@ impl GhosttyView {
                             }),
                         ),
                 )
+                .children(window_drag_listener)
                 .into_any_element(),
         )
     }
@@ -1485,6 +1534,7 @@ impl GhosttyView {
 
     fn cancel_left_pointer_interactions(&mut self, position: Point<Pixels>) {
         self.stop_selection_autoscroll();
+        self.scrollbar_drag = None;
         self.mouse_down_link = None;
         self.suppress_link_mouse_up = false;
         self.finish_left_mouse_sequence(position);
@@ -1492,6 +1542,7 @@ impl GhosttyView {
 
     fn cancel_pointer_interactions(&mut self) {
         self.stop_selection_autoscroll();
+        self.scrollbar_drag = None;
         let Some(position) = self.last_mouse_position else {
             self.mouse_down_link = None;
             self.suppress_link_mouse_up = false;
@@ -5108,6 +5159,28 @@ mod tests {
             let (scrollbar, layout) = view.scrollbar_thumb().unwrap();
             view.page_scrollbar_toward(point(px(821.0), px(47.0 + layout.thumb_top_px - 5.0)));
             assert_eq!(scroll_offset(view) + scrollbar.len, bottom);
+        });
+    }
+
+    #[gpui::test]
+    fn cancelling_pointer_interactions_ends_a_scrollbar_drag(cx: &mut gpui::TestAppContext) {
+        use gpui::{point, px};
+
+        let view = pty_test_view(cx, 80, 1.0, &scrollback_script(""), "READY");
+        view.update(cx, |view, _cx| {
+            let (_, layout) = view.scrollbar_thumb().unwrap();
+            let grab = point(px(821.0), px(47.0 + layout.thumb_top_px + 1.0));
+
+            view.start_scrollbar_drag(grab);
+            view.cancel_pointer_interactions();
+            assert!(
+                !view.end_scrollbar_drag(),
+                "focus loss and shutdown end the drag"
+            );
+
+            view.start_scrollbar_drag(grab);
+            view.cancel_left_pointer_interactions(grab);
+            assert!(!view.end_scrollbar_drag(), "a new left press ends the drag");
         });
     }
 }
