@@ -4,6 +4,19 @@ All notable changes to con are documented here.
 
 con is still pre-release, so entries may group related beta work while the product shape is stabilizing.
 
+## `v0.1.0-beta.143`
+
+### Fixed
+
+**Linux**
+
+- Terminal output can be scrolled back. The mouse wheel and touchpad move
+  through scrollback (or scroll pagers such as `less`), Shift+PgUp and
+  Shift+PgDn page through it, and a scrollbar shows the position and can be
+  dragged. Shift+wheel scrolls Con's view even inside programs that use the
+  mouse.
+  _(PR [#499](https://github.com/nowledge-co/con-terminal/pull/499) by [@Towerism](https://github.com/Towerism))_
+
 ## `v0.1.0-beta.142` - 2026-10-19
 
 ### Fixed
