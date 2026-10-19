@@ -39,6 +39,12 @@ mkdir -p "$XDG_CONFIG_HOME/con" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_H
 printf '#!/bin/sh\nexec /usr/bin/env\n' > "$profile/login-env-stub"
 chmod +x "$profile/login-env-stub"
 export SHELL=$profile/login-env-stub
+# bash --norc still honours these from the environment. A custom prompt
+# would hide the '$ ' the script waits for, PROMPT_COMMAND would run your
+# code, readline would read ~/.inputrc, and LESS=-X would keep less off the
+# alternate screen the last step tests.
+export PS1='repro$ ' INPUTRC=/dev/null LESS=
+unset PROMPT_COMMAND LESSOPEN LESSCLOSE LESSKEY
 printf 'con.version = 1\ncommand = bash --noprofile --norc\n' > "$XDG_CONFIG_HOME/con/con.conf"
 for ((i = 1; i <= rows; i++)); do printf 'scroll-repro row %03d\n' "$i"; done > "$profile/rows.txt"
 results=$profile/results.txt
@@ -99,7 +105,8 @@ wait_for() {
 }
 
 wait_for '\$ '
-send "clear; cat '$profile/rows.txt'"$'\r'
+rows_file=$(printf %q "$profile/rows.txt")
+send "clear; cat $rows_file"$'\r'
 wait_for "row $(printf '%03d' "$rows")"
 
 # Ctrl+U clears the shell's input line. It is still input, so a working
@@ -165,6 +172,11 @@ else
     skip "input returns to bottom" "wheel up"
 fi
 
+ask_row "shift+wheel up" \
+    "Hold Shift, hover over Con's terminal and scroll the wheel UP about three notches." \
+    1 $((last - 1))
+return_to_bottom
+
 ask_row "shift+pgup" \
     "Click inside Con's terminal and press Shift+PgUp once." \
     1 $((last - 5))
@@ -183,14 +195,15 @@ ask_yes "scrollbar visible" \
 
 if passed "scrollbar visible"; then
     echo
-    echo "Drag that thumb to the very top of the pane."
+    echo "Drag that thumb up past the top edge of the pane, and release the"
+    echo "button above the pane, outside the terminal."
     ask_yes "scrollbar drag to top" "Is 'scroll-repro row 001' now the top row in Con?"
 else
     skip "scrollbar drag to top" "scrollbar visible"
 fi
 
 return_to_bottom
-send "less '$profile/rows.txt'"$'\r'
+send "less $rows_file"$'\r'
 sleep 1
 echo
 echo "== less before scrolling"
