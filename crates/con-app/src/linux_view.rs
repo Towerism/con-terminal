@@ -1070,6 +1070,52 @@ impl GhosttyView {
         })
     }
 
+    /// Send a wheel event to the application when it tracks the mouse, and
+    /// otherwise scroll Con's own scrollback (or, on the alternate screen,
+    /// send cursor keys). Shift always scrolls Con's view, per xterm.
+    /// Returns whether the event was used.
+    fn handle_scroll_wheel(&mut self, event: &ScrollWheelEvent) -> bool {
+        let Some(terminal) = self.terminal().filter(|t| t.is_attached()).cloned() else {
+            return false;
+        };
+        self.mouse_modifiers = event.modifiers;
+        let row_height_px = cell_height_px(effective_font_size(self.initial_font_size));
+
+        // Decide from the application's modes, not from whether a report was
+        // written: a press over the padding writes nothing, and must not
+        // scroll Con's view under an application that tracks the mouse.
+        if terminal.mouse_tracking_active() && !event.modifiers.shift {
+            let delta = match event.delta {
+                ScrollDelta::Lines(delta) => delta,
+                ScrollDelta::Pixels(delta) => point(f32::from(delta.x), f32::from(delta.y)),
+            };
+            // Match Windows: one directional report per host wheel event,
+            // not a burst of synthetic presses proportional to acceleration.
+            let mut reported = false;
+            for (amount, negative, positive) in [
+                (delta.y, VtMouseButton::Button5, VtMouseButton::Button4),
+                (delta.x, VtMouseButton::Button7, VtMouseButton::Button6),
+            ] {
+                if amount.abs() < f32::EPSILON {
+                    continue;
+                }
+                let button = if amount < 0.0 { negative } else { positive };
+                reported |= self.report_mouse(event.position, VtMouseAction::Press, Some(button));
+            }
+            return reported;
+        }
+
+        let delta_y_px = match event.delta {
+            ScrollDelta::Lines(delta) => delta.y * row_height_px,
+            ScrollDelta::Pixels(delta) => f32::from(delta.y),
+        };
+        if delta_y_px.abs() < f32::EPSILON {
+            return false;
+        }
+        terminal.scroll_viewport_or_alt_screen(delta_y_px, row_height_px, !event.modifiers.shift);
+        true
+    }
+
     fn grid_pointer(&self, pos: Point<Pixels>, clamp_to_grid: bool) -> Option<GridPointer> {
         let bounds = self.pane_bounds?;
         let snapshot = self.snapshot.as_ref()?;
@@ -2680,30 +2726,9 @@ impl Render for GhosttyView {
                 }),
             )
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
-                if event.modifiers.shift {
-                    return;
-                }
-                this.mouse_modifiers = event.modifiers;
-                let delta = match event.delta {
-                    ScrollDelta::Lines(delta) => delta,
-                    ScrollDelta::Pixels(delta) => point(f32::from(delta.x), f32::from(delta.y)),
-                };
-                // Match Windows: one directional report per host wheel event,
-                // not a burst of synthetic presses proportional to acceleration.
-                let mut reported = false;
-                for (amount, negative, positive) in [
-                    (delta.y, VtMouseButton::Button5, VtMouseButton::Button4),
-                    (delta.x, VtMouseButton::Button7, VtMouseButton::Button6),
-                ] {
-                    if amount.abs() < f32::EPSILON {
-                        continue;
-                    }
-                    let button = if amount < 0.0 { negative } else { positive };
-                    reported |=
-                        this.report_mouse(event.position, VtMouseAction::Press, Some(button));
-                }
-                if reported {
+                if this.handle_scroll_wheel(event) {
                     cx.stop_propagation();
+                    cx.notify();
                 }
             }))
             .child(
@@ -4639,5 +4664,148 @@ mod tests {
         rows.dedup();
 
         assert_eq!(rows, vec![0, 1, 2]);
+    }
+
+    /// A child that prints `row-001` to `row-200`, sets `modes`, then waits.
+    fn scrollback_script(modes: &str) -> String {
+        format!(
+            "stty raw -echo; i=1; while [ $i -le 200 ]; do printf 'row-%03d\\r\\n' $i; \
+             i=$((i+1)); done; printf '{modes}READY'; exec sleep 30"
+        )
+    }
+
+    fn wheel(x: f32, y: f32, delta: gpui::ScrollDelta, shift: bool) -> gpui::ScrollWheelEvent {
+        gpui::ScrollWheelEvent {
+            position: gpui::point(gpui::px(x), gpui::px(y)),
+            delta,
+            modifiers: gpui::Modifiers {
+                shift,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn lines(y: f32) -> gpui::ScrollDelta {
+        gpui::ScrollDelta::Lines(gpui::point(0.0, y))
+    }
+
+    fn scroll_offset(view: &super::GhosttyView) -> u64 {
+        view.terminal()
+            .unwrap()
+            .scrollbar()
+            .expect("scrollbar state")
+            .offset
+    }
+
+    // Inside the painted grid of `pty_test_view`'s pane at (31, 47).
+    const GRID_X: f32 = 100.0;
+    const GRID_Y: f32 = 120.0;
+
+    #[gpui::test]
+    fn wheel_scrolls_scrollback_when_the_app_does_not_track_the_mouse(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let view = pty_test_view(cx, 80, 1.0, &scrollback_script(""), "READY");
+        view.update(cx, |view, _cx| {
+            let bottom = scroll_offset(view);
+            assert!(bottom > 0, "200 rows must overflow the pane");
+
+            assert!(view.handle_scroll_wheel(&wheel(GRID_X, GRID_Y, lines(5.0), false)));
+            assert_eq!(scroll_offset(view) + 5, bottom);
+
+            assert!(view.handle_scroll_wheel(&wheel(GRID_X, GRID_Y, lines(-5.0), false)));
+            assert_eq!(scroll_offset(view), bottom);
+        });
+    }
+
+    #[gpui::test]
+    fn fractional_wheel_deltas_add_up_to_whole_rows(cx: &mut gpui::TestAppContext) {
+        let view = pty_test_view(cx, 80, 1.5, &scrollback_script(""), "READY");
+        view.update(cx, |view, _cx| {
+            let bottom = scroll_offset(view);
+            // GPUI on Wayland reports a high-resolution wheel as fractions
+            // of its three-line notch.
+            for _ in 0..4 {
+                view.handle_scroll_wheel(&wheel(GRID_X, GRID_Y, lines(0.75), false));
+            }
+            assert_eq!(scroll_offset(view) + 3, bottom);
+
+            let row = super::cell_height_px(super::effective_font_size(14.0));
+            for _ in 0..10 {
+                let pixels =
+                    gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(row / 10.0)));
+                view.handle_scroll_wheel(&wheel(GRID_X, GRID_Y, pixels, false));
+            }
+            assert_eq!(scroll_offset(view) + 4, bottom);
+        });
+    }
+
+    #[gpui::test]
+    fn wheel_goes_to_an_app_that_tracks_the_mouse(cx: &mut gpui::TestAppContext) {
+        let script = scrollback_script("\x1b[?1002h\x1b[?1006h");
+        let view = pty_test_view(cx, 80, 1.0, &script, "READY");
+        view.update(cx, |view, _cx| {
+            let terminal = view.terminal().unwrap().clone();
+            let bottom = scroll_offset(view);
+            let generation = terminal.input_generation();
+
+            assert!(view.handle_scroll_wheel(&wheel(GRID_X, GRID_Y, lines(3.0), false)));
+            assert_eq!(terminal.input_generation(), generation + 1, "wheel report");
+            assert_eq!(scroll_offset(view), bottom);
+
+            // Over the padding nothing is reported, and the view stays put.
+            assert!(!view.handle_scroll_wheel(&wheel(35.0, GRID_Y, lines(3.0), false)));
+            assert_eq!(terminal.input_generation(), generation + 1);
+            assert_eq!(scroll_offset(view), bottom);
+        });
+    }
+
+    #[gpui::test]
+    fn shift_wheel_scrolls_scrollback_even_when_the_app_tracks_the_mouse(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let script = scrollback_script("\x1b[?1002h\x1b[?1006h");
+        let view = pty_test_view(cx, 80, 1.0, &script, "READY");
+        view.update(cx, |view, _cx| {
+            let terminal = view.terminal().unwrap().clone();
+            let bottom = scroll_offset(view);
+            let generation = terminal.input_generation();
+
+            assert!(view.handle_scroll_wheel(&wheel(GRID_X, GRID_Y, lines(3.0), true)));
+            assert_eq!(
+                terminal.input_generation(),
+                generation,
+                "no report with Shift"
+            );
+            assert_eq!(scroll_offset(view) + 3, bottom);
+        });
+    }
+
+    #[gpui::test]
+    fn horizontal_wheel_leaves_the_scrollback_alone(cx: &mut gpui::TestAppContext) {
+        let view = pty_test_view(cx, 80, 1.0, &scrollback_script(""), "READY");
+        view.update(cx, |view, _cx| {
+            let bottom = scroll_offset(view);
+            let sideways = gpui::ScrollDelta::Lines(gpui::point(3.0, 0.0));
+            assert!(!view.handle_scroll_wheel(&wheel(GRID_X, GRID_Y, sideways, false)));
+            assert_eq!(scroll_offset(view), bottom);
+        });
+    }
+
+    #[gpui::test]
+    fn wheel_without_a_session_does_nothing(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+
+        let app = Arc::new(
+            con_ghostty::GhosttyApp::new(
+                None, None, None, None, None, None, None, None, None, None, None, None, None, false,
+            )
+            .unwrap(),
+        );
+        let view = cx.new(|cx| super::GhosttyView::new(app, None, None, None, 14.0, cx));
+        view.update(cx, |view, _cx| {
+            assert!(!view.handle_scroll_wheel(&wheel(GRID_X, GRID_Y, lines(3.0), false)));
+        });
     }
 }
