@@ -1139,9 +1139,16 @@ impl GhosttyView {
             return reported;
         }
 
-        let delta_y_px = match event.delta {
-            ScrollDelta::Lines(delta) => delta.y * row_height_px,
-            ScrollDelta::Pixels(delta) => f32::from(delta.y),
+        let delta = match event.delta {
+            ScrollDelta::Lines(delta) => point(delta.x * row_height_px, delta.y * row_height_px),
+            ScrollDelta::Pixels(delta) => point(f32::from(delta.x), f32::from(delta.y)),
+        };
+        // GPUI's X11 and Wayland backends turn a Shift+wheel into horizontal
+        // movement, so with Shift held the vertical amount arrives on `x`.
+        let delta_y_px = if event.modifiers.shift && delta.y.abs() < f32::EPSILON {
+            delta.x
+        } else {
+            delta.y
         };
         if delta_y_px.abs() < f32::EPSILON {
             return false;
@@ -4940,13 +4947,31 @@ mod tests {
             let bottom = scroll_offset(view);
             let generation = terminal.input_generation();
 
-            assert!(view.handle_scroll_wheel(&wheel(GRID_X, GRID_Y, lines(3.0), true)));
+            // GPUI's X11 and Wayland backends move a Shift+wheel onto the
+            // horizontal axis before the view sees it.
+            let shift_wheel_up = gpui::ScrollDelta::Lines(gpui::point(3.0, 0.0));
+            assert!(view.handle_scroll_wheel(&wheel(GRID_X, GRID_Y, shift_wheel_up, true)));
             assert_eq!(
                 terminal.input_generation(),
                 generation,
                 "no report with Shift"
             );
             assert_eq!(scroll_offset(view) + 3, bottom);
+        });
+    }
+
+    #[gpui::test]
+    fn shift_wheel_scrolls_scrollback_at_a_prompt(cx: &mut gpui::TestAppContext) {
+        let view = pty_test_view(cx, 80, 1.0, &scrollback_script(""), "READY");
+        view.update(cx, |view, _cx| {
+            let bottom = scroll_offset(view);
+            let shift_wheel_up = gpui::ScrollDelta::Lines(gpui::point(3.0, 0.0));
+            assert!(view.handle_scroll_wheel(&wheel(GRID_X, GRID_Y, shift_wheel_up, true)));
+            assert_eq!(scroll_offset(view) + 3, bottom);
+
+            let shift_wheel_down = gpui::ScrollDelta::Lines(gpui::point(-3.0, 0.0));
+            assert!(view.handle_scroll_wheel(&wheel(GRID_X, GRID_Y, shift_wheel_down, true)));
+            assert_eq!(scroll_offset(view), bottom);
         });
     }
 
