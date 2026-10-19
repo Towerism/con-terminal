@@ -52,6 +52,12 @@ when it sits in platform-named files. Here the code depended only on the shared
 adding Windows or Linux input behaviour, check whether the other backend's view
 already has it.
 
+The first version of the Shift+wheel path read only the vertical delta, and
+its test built a vertical Shift+wheel event. GPUI never sends one on Linux: its
+X11 and Wayland backends move a Shift+wheel onto the horizontal axis. The review
+of the branch caught it. Tests for input handling should build events the way
+the platform layer does, so check GPUI's backend before writing one.
+
 `con-cli panes read` returns the transcript tail, not the rows on screen, so the
 control socket cannot check the scroll position. The repro script asks the
 tester for the lowest visible row instead. The automated checks are view tests

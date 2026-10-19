@@ -159,7 +159,8 @@ must not scroll Con's view under a tracking application. Otherwise
 `LinuxPtySession::scroll_viewport_or_alt_screen` scrolls the scrollback, or on
 the alternate screen with alt-scroll mode (DECSET 1007) sends cursor keys.
 Convert wheel deltas with the painted logical row height, as in the grid
-geometry contract above. The row remainder and cursor-key helpers live in
+geometry contract above. GPUI's X11 and Wayland backends move a Shift+wheel onto
+the horizontal axis, so with Shift held the vertical amount arrives on `x`. The row remainder and cursor-key helpers live in
 `con-ghostty/src/scroll.rs`, shared with Windows.
 
 Shift+PgUp/PgDn page Con's view on the primary screen and go to the application
