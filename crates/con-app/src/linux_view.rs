@@ -209,6 +209,34 @@ fn cell_height_px(font_size_px: f32) -> f32 {
     (font_size_px * DEFAULT_CELL_HEIGHT_RATIO).round().max(14.0)
 }
 
+/// Rows to move Con's scrollback for Shift+PgUp or Shift+PgDn, in
+/// libghostty-vt's sign (negative is up), matching Ghostty's default
+/// `scroll_page_up`/`scroll_page_down` bindings. Returns `None` when the
+/// key belongs to the application: any other key or modifier, or the
+/// alternate screen, where pagers and editors use these keys themselves.
+fn scrollback_page_rows(
+    keystroke: &gpui::Keystroke,
+    alternate_screen: bool,
+    page_rows: u16,
+) -> Option<isize> {
+    let modifiers = &keystroke.modifiers;
+    if alternate_screen
+        || !modifiers.shift
+        || modifiers.control
+        || modifiers.alt
+        || modifiers.platform
+        || modifiers.function
+    {
+        return None;
+    }
+    let rows = page_rows.max(1) as isize;
+    match keystroke.key.as_str() {
+        "pageup" => Some(-rows),
+        "pagedown" => Some(rows),
+        _ => None,
+    }
+}
+
 fn physical_cell_size(font_size_px: f32, scale_factor: f32) -> (u32, u32) {
     let scale_factor = scale_factor.max(f32::EPSILON);
     (
@@ -1116,6 +1144,21 @@ impl GhosttyView {
         true
     }
 
+    /// Page Con's scrollback for Shift+PgUp/PgDn on the primary screen.
+    /// Returns whether the key was used; unused keys go to the application.
+    fn try_page_scrollback(&mut self, keystroke: &gpui::Keystroke) -> bool {
+        let Some(terminal) = self.terminal().filter(|t| t.is_attached()).cloned() else {
+            return false;
+        };
+        let page_rows = self.snapshot.as_ref().map_or(1, |snapshot| snapshot.rows);
+        let Some(rows) = scrollback_page_rows(keystroke, terminal.is_alternate_screen(), page_rows)
+        else {
+            return false;
+        };
+        terminal.scroll_viewport_rows(rows);
+        true
+    }
+
     fn grid_pointer(&self, pos: Point<Pixels>, clamp_to_grid: bool) -> Option<GridPointer> {
         let bounds = self.pane_bounds?;
         let snapshot = self.snapshot.as_ref()?;
@@ -1577,6 +1620,10 @@ impl GhosttyView {
             &crate::FindInTerminal,
         ) {
             return false;
+        }
+        if self.try_page_scrollback(keystroke) {
+            cx.notify();
+            return true;
         }
         // App-level tab selection. Let GPUI dispatch SelectTab1..9
         // instead of forwarding Ctrl+digit to the shell.
@@ -4806,6 +4853,63 @@ mod tests {
         let view = cx.new(|cx| super::GhosttyView::new(app, None, None, None, 14.0, cx));
         view.update(cx, |view, _cx| {
             assert!(!view.handle_scroll_wheel(&wheel(GRID_X, GRID_Y, lines(3.0), false)));
+        });
+    }
+
+    fn keystroke(text: &str) -> gpui::Keystroke {
+        gpui::Keystroke::parse(text).unwrap()
+    }
+
+    #[test]
+    fn shift_page_keys_page_the_primary_screen_scrollback() {
+        use super::scrollback_page_rows;
+
+        assert_eq!(
+            scrollback_page_rows(&keystroke("shift-pageup"), false, 24),
+            Some(-24)
+        );
+        assert_eq!(
+            scrollback_page_rows(&keystroke("shift-pagedown"), false, 24),
+            Some(24)
+        );
+        for (text, alternate_screen) in [
+            ("shift-pageup", true),
+            ("shift-pagedown", true),
+            ("pageup", false),
+            ("ctrl-shift-pageup", false),
+            ("alt-shift-pageup", false),
+            ("shift-up", false),
+        ] {
+            assert_eq!(
+                scrollback_page_rows(&keystroke(text), alternate_screen, 24),
+                None,
+                "{text} on the alternate screen: {alternate_screen}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn shift_page_up_pages_scrollback_without_writing_to_the_pty(cx: &mut gpui::TestAppContext) {
+        let view = pty_test_view(cx, 80, 1.0, &scrollback_script(""), "READY");
+        view.update(cx, |view, _cx| {
+            let terminal = view.terminal().unwrap().clone();
+            let bottom = scroll_offset(view);
+            let generation = terminal.input_generation();
+
+            assert!(view.try_page_scrollback(&keystroke("shift-pageup")));
+            assert_eq!(scroll_offset(view) + 24, bottom);
+            assert_eq!(terminal.input_generation(), generation);
+
+            assert!(view.try_page_scrollback(&keystroke("shift-pagedown")));
+            assert_eq!(scroll_offset(view), bottom);
+        });
+    }
+
+    #[gpui::test]
+    fn shift_page_up_belongs_to_alternate_screen_apps(cx: &mut gpui::TestAppContext) {
+        let view = pty_test_view(cx, 80, 1.0, &scrollback_script("\x1b[?1049h"), "READY");
+        view.update(cx, |view, _cx| {
+            assert!(!view.try_page_scrollback(&keystroke("shift-pageup")));
         });
     }
 }
