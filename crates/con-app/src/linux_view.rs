@@ -40,6 +40,9 @@ use crate::terminal_paste::{
     payload_from_external_paths, unsafe_paste_preview,
 };
 use crate::terminal_restore::restored_terminal_output;
+use crate::terminal_scrollbar::{
+    SCROLLBAR_INSET_PX, SCROLLBAR_WIDTH_PX, ThumbDrag, ThumbLayout, thumb_layout, track_click_rows,
+};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const MIN_FONT_SIZE_PX: f32 = 12.0;
@@ -478,6 +481,8 @@ pub struct GhosttyView {
     terminal_middle_mouse_sequence: MouseButtonSequence<()>,
     selection_autoscroll_epoch: u64,
     selection_autoscroll_active: bool,
+    /// Set while the left button holds the scrollbar thumb.
+    scrollbar_drag: Option<ThumbDrag>,
     keys_awaiting_release: HashMap<String, crate::terminal_keys::TrackedVtKey>,
     pending_unsafe_paste: Option<(String, VtPasteSource)>,
 }
@@ -587,6 +592,7 @@ impl GhosttyView {
             terminal_middle_mouse_sequence: MouseButtonSequence::default(),
             selection_autoscroll_epoch: 0,
             selection_autoscroll_active: false,
+            scrollbar_drag: None,
             keys_awaiting_release: HashMap::new(),
             pending_unsafe_paste: None,
         }
@@ -1157,6 +1163,103 @@ impl GhosttyView {
         };
         terminal.scroll_viewport_rows(rows);
         true
+    }
+
+    /// The scrollbar state and thumb position, or `None` when there is no
+    /// scrollback to show.
+    fn scrollbar_thumb(&self) -> Option<(con_ghostty::GhosttyScrollbar, ThumbLayout)> {
+        let bounds = self.pane_bounds?;
+        let scrollbar = self.terminal()?.scrollbar()?;
+        Some((
+            scrollbar,
+            thumb_layout(f32::from(bounds.size.height), scrollbar)?,
+        ))
+    }
+
+    fn start_scrollbar_drag(&mut self, pos: Point<Pixels>) {
+        if let Some((scrollbar, layout)) = self.scrollbar_thumb() {
+            self.scrollbar_drag = Some(ThumbDrag::start(f32::from(pos.y), scrollbar, layout));
+        }
+    }
+
+    fn drag_scrollbar(&mut self, pos: Point<Pixels>) {
+        let Some(target) = self
+            .scrollbar_drag
+            .and_then(|drag| drag.target_offset(f32::from(pos.y)))
+        else {
+            return;
+        };
+        if let Some(terminal) = self.terminal() {
+            terminal.scroll_viewport_to_offset(target);
+        }
+    }
+
+    /// Returns whether a thumb drag was in progress.
+    fn end_scrollbar_drag(&mut self) -> bool {
+        self.scrollbar_drag.take().is_some()
+    }
+
+    fn page_scrollbar_toward(&mut self, pos: Point<Pixels>) {
+        let (Some((scrollbar, layout)), Some(bounds)) = (self.scrollbar_thumb(), self.pane_bounds)
+        else {
+            return;
+        };
+        let local_y = f32::from(pos.y) - f32::from(bounds.origin.y);
+        let rows = track_click_rows(local_y, layout, scrollbar);
+        if rows != 0
+            && let Some(terminal) = self.terminal()
+        {
+            terminal.scroll_viewport_rows(rows);
+        }
+    }
+
+    /// The overlay thumb, drawn like the Windows view's: theme foreground
+    /// at low opacity, no border or shadow.
+    fn render_terminal_scrollbar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (_, layout) = self.scrollbar_thumb()?;
+        let theme = cx.theme();
+        let thumb_color = theme.foreground.opacity(0.28);
+        let thumb_hover_color = theme.foreground.opacity(0.42);
+
+        Some(
+            div()
+                .absolute()
+                .top(px(SCROLLBAR_INSET_PX))
+                .right(px(2.0))
+                .bottom(px(SCROLLBAR_INSET_PX))
+                .w(px(SCROLLBAR_WIDTH_PX + 4.0))
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                        window.prevent_default();
+                        this.page_scrollbar_toward(event.position);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(layout.thumb_top_px - SCROLLBAR_INSET_PX))
+                        .right(px(2.0))
+                        .w(px(SCROLLBAR_WIDTH_PX))
+                        .h(px(layout.thumb_height_px))
+                        .rounded(px(SCROLLBAR_WIDTH_PX / 2.0))
+                        .bg(thumb_color)
+                        .hover(|style| style.bg(thumb_hover_color))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                window.prevent_default();
+                                this.start_scrollbar_drag(event.position);
+                                cx.stop_propagation();
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     fn grid_pointer(&self, pos: Point<Pixels>, clamp_to_grid: bool) -> Option<GridPointer> {
@@ -2115,6 +2218,7 @@ impl Render for GhosttyView {
             .map(|snapshot| snapshot.kitty_placements.clone())
             .unwrap_or_default();
         self.sync_kitty_image_cache(&kitty_placements, window, cx);
+        let scrollbar_overlay = self.render_terminal_scrollbar(cx);
 
         let theme = cx.theme();
         let focus = self.focus_handle.clone();
@@ -2472,6 +2576,7 @@ impl Render for GhosttyView {
         {
             terminal_children.push(preview.into_any_element());
         }
+        terminal_children.extend(scrollbar_overlay);
         let terminal_layer = div()
             .relative()
             .size_full()
@@ -2633,6 +2738,14 @@ impl Render for GhosttyView {
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 this.last_mouse_position = Some(event.position);
                 this.mouse_modifiers = event.modifiers;
+                if this.scrollbar_drag.is_some() {
+                    if event.pressed_button == Some(MouseButton::Left) {
+                        this.drag_scrollbar(event.position);
+                        cx.notify();
+                        return;
+                    }
+                    this.end_scrollbar_drag();
+                }
                 if this.suppress_link_mouse_up {
                     if event.pressed_button == Some(MouseButton::Left) {
                         let mut changed = this.update_hovered_link(&event.modifiers);
@@ -2672,6 +2785,10 @@ impl Render for GhosttyView {
                 cx.listener(|this, event: &MouseUpEvent, window, cx| {
                     this.last_mouse_position = Some(event.position);
                     this.mouse_modifiers = event.modifiers;
+                    if this.end_scrollbar_drag() {
+                        cx.notify();
+                        return;
+                    }
                     if this.suppress_link_mouse_up {
                         let down_link = this.mouse_down_link.take();
                         this.suppress_link_mouse_up = false;
@@ -2698,6 +2815,10 @@ impl Render for GhosttyView {
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                    if this.end_scrollbar_drag() {
+                        cx.notify();
+                        return;
+                    }
                     if !this.terminal_left_mouse_sequence.is_active()
                         && !this.suppress_link_mouse_up
                     {
@@ -4910,6 +5031,58 @@ mod tests {
         let view = pty_test_view(cx, 80, 1.0, &scrollback_script("\x1b[?1049h"), "READY");
         view.update(cx, |view, _cx| {
             assert!(!view.try_page_scrollback(&keystroke("shift-pageup")));
+        });
+    }
+
+    #[gpui::test]
+    fn scrollbar_thumb_appears_only_with_scrollback(cx: &mut gpui::TestAppContext) {
+        let view = pty_test_view(cx, 80, 1.0, &scrollback_script(""), "READY");
+        view.update(cx, |view, _cx| assert!(view.scrollbar_thumb().is_some()));
+
+        let view = pty_test_view(
+            cx,
+            80,
+            1.0,
+            "stty raw -echo; printf READY; exec sleep 30",
+            "READY",
+        );
+        view.update(cx, |view, _cx| assert!(view.scrollbar_thumb().is_none()));
+    }
+
+    #[gpui::test]
+    fn dragging_the_scrollbar_thumb_to_the_top_shows_the_oldest_row(cx: &mut gpui::TestAppContext) {
+        use gpui::{point, px};
+
+        let view = pty_test_view(cx, 80, 1.0, &scrollback_script(""), "READY");
+        view.update(cx, |view, _cx| {
+            let (_, layout) = view.scrollbar_thumb().unwrap();
+            let x = px(31.0 + 790.0);
+            let grab = 47.0 + layout.thumb_top_px + layout.thumb_height_px / 2.0;
+            view.start_scrollbar_drag(point(x, px(grab)));
+            view.drag_scrollbar(point(x, px(grab - 2_000.0)));
+
+            assert_eq!(scroll_offset(view), 0);
+            let terminal = view.terminal().unwrap();
+            assert!(
+                terminal.read_screen_text(24).join("\n").contains("row-001"),
+                "{:?}",
+                terminal.read_screen_text(24)
+            );
+            assert!(view.end_scrollbar_drag());
+            assert!(!view.end_scrollbar_drag(), "the drag ends once");
+        });
+    }
+
+    #[gpui::test]
+    fn clicking_the_scrollbar_track_above_the_thumb_pages_up(cx: &mut gpui::TestAppContext) {
+        use gpui::{point, px};
+
+        let view = pty_test_view(cx, 80, 1.0, &scrollback_script(""), "READY");
+        view.update(cx, |view, _cx| {
+            let bottom = scroll_offset(view);
+            let (scrollbar, layout) = view.scrollbar_thumb().unwrap();
+            view.page_scrollbar_toward(point(px(821.0), px(47.0 + layout.thumb_top_px - 5.0)));
+            assert_eq!(scroll_offset(view) + scrollbar.len, bottom);
         });
     }
 }
