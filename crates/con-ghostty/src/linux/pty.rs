@@ -570,16 +570,31 @@ impl LinuxPtySession {
             return;
         }
 
-        if screen.scroll_viewport_delta(viewport_delta_for_scroll_rows(rows)) {
-            self.mark_needs_render();
-        }
+        self.scroll_viewport_delta(viewport_delta_for_scroll_rows(rows));
     }
 
     /// Scroll by `rows` in libghostty-vt's sign: negative is up, toward
     /// older rows.
     pub fn scroll_viewport_rows(&self, rows: isize) {
         self.scroll_remainder.lock().reset();
-        if self.shared.screen.scroll_viewport_delta(rows) {
+        self.scroll_viewport_delta(rows);
+    }
+
+    /// Scroll by `rows` in libghostty-vt's sign, skipping the call when the
+    /// viewport already sits at the end it would move toward. libghostty-vt
+    /// asks for a full snapshot on every viewport scroll, even one that
+    /// cannot move, so a touchpad held against either end would redraw the
+    /// whole pane on every event.
+    fn scroll_viewport_delta(&self, rows: isize) {
+        let screen = &self.shared.screen;
+        if let Some(scrollbar) = screen.scrollbar() {
+            let at_top = scrollbar.offset == 0;
+            let at_tail = scrollbar.offset >= scrollbar.total.saturating_sub(scrollbar.len);
+            if (rows < 0 && at_top) || (rows > 0 && at_tail) {
+                return;
+            }
+        }
+        if screen.scroll_viewport_delta(rows) {
             self.mark_needs_render();
         }
     }
@@ -2628,13 +2643,26 @@ mod tests {
         let session = scroll_test_session(IDLE_CHILD);
         feed_numbered_rows(&session, 200);
         let bottom = session.scrollbar().unwrap();
+        session.take_needs_render();
 
         session.scroll_viewport_or_alt_screen(-3.0 * 20.0, 20.0, true);
         assert_eq!(session.scrollbar().unwrap().offset, bottom.offset);
+        assert!(
+            !session.take_needs_render(),
+            "scrolling down at the live tail must not redraw"
+        );
 
         session.scroll_viewport_or_alt_screen(10_000.0 * 20.0, 20.0, true);
         assert_eq!(session.scrollbar().unwrap().offset, 0);
         assert_eq!(first_visible_row(&session), "row-001");
+        session.take_needs_render();
+
+        session.scroll_viewport_or_alt_screen(3.0 * 20.0, 20.0, true);
+        session.scroll_viewport_rows(-3);
+        assert!(
+            !session.take_needs_render(),
+            "scrolling up at the oldest row must not redraw"
+        );
     }
 
     #[test]
